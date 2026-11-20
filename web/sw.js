@@ -1,6 +1,6 @@
 // GENERADO por tools/build-sw.mjs — no editar a mano.
 // Guarda la aplicación en el dispositivo para que funcione sin conexión (en el campo).
-const CACHE = 'toposcribe-35ba49b83b67';
+const CACHE = 'toposcribe-737d3dd6cec6';
 const FILES = [
   "./",
   "css/app.css",

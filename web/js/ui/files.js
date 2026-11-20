@@ -2,6 +2,11 @@
 import { getPhoto } from '../storage/db.js';
 
 export function downloadBlob(filename, blob) {
+  // Dentro del APK de Android (WebView) los archivos se guardan en Descargas mediante el puente nativo.
+  if (globalThis.AndroidBridge?.saveFile) {
+    blobToBase64(blob).then((b64) => globalThis.AndroidBridge.saveFile(filename, blob.type || 'application/octet-stream', b64));
+    return;
+  }
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = url;

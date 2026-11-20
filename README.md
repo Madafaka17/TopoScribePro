@@ -68,6 +68,28 @@ python3 -m http.server 8080 --directory web
 dirección `http://192.168.x.x:8080` que muestra la consola. Sin https el modo sin conexión no se activa,
 pero la app funciona.
 
+### APK de Android
+
+La carpeta [`android/`](android) es un contenedor Android mínimo: empaqueta la carpeta `web/` dentro
+del APK y la muestra en un WebView (la misma app, sin conexión), con selector de archivos, cámara para
+las fotografías y guardado de PDF, DXF, Excel, CSV y respaldos en *Descargas/TopoScribePro*.
+
+* Paquete `com.toposcribe.web`, distinto de la app anterior (`com.toposcribe.pro`): instalarlo **no**
+  reemplaza la app vieja ni borra sus datos, así que puede migrarlos después.
+* Compilar (requiere el SDK de Android, por ejemplo el de Android Studio):
+
+```bash
+cd android && ./gradlew assembleDebug
+```
+
+  El APK queda en `android/app/build/outputs/apk/debug/app-debug.apk`. Cada push también lo compila
+  en GitHub Actions (flujo **Compilar APK de Android**, artefacto `TopoScribePro-apk`).
+* Es un APK de **depuración** firmado con la clave de pruebas de Android: sirve para instalarlo en
+  el teléfono (activando «Instalar apps desconocidas»), no para publicarlo en Google Play.
+* Si cambia algo en `web/`, vuelva a compilar el APK para incluirlo.
+* Los datos del APK son independientes de los del navegador: use «Exportar proyecto (.json)» para
+  pasarlos de uno a otro. Al desinstalar el APK se borran sus datos.
+
 ### Dónde quedan los datos
 
 En el almacenamiento del navegador de **cada** dispositivo. Para pasar un proyecto del celular a la
@@ -139,6 +161,7 @@ web/                 aplicación (se publica tal cual, sin compilación)
   vendor/            bibliotecas y fuentes con sus licencias
 tests/               pruebas unitarias, de navegador y datos de prueba
 tools/               servidor local, generador del service worker y de la plantilla DXF
+android/             contenedor Android (APK) que empaqueta web/
 android-legacy/      versión Android anterior (sin cambios)
 ```
 
@@ -147,7 +170,10 @@ android-legacy/      versión Android anterior (sin cambios)
 * El DXF se verificó con **ezdxf** (lectura y auditoría sin errores, unidades en metros, AC1015) y con
   **dxf-parser**, pero **no se abrió en AutoCAD** (no disponible en el entorno de desarrollo).
 * La interfaz se probó en Chromium de escritorio y con emulación de Pixel 7; **no en un teléfono físico
-  ni en Safari/iPhone**.
+  ni en Safari/iPhone**. El APK se compiló y se verificó su contenido y firma, y la app se probó en las
+  condiciones del WebView (mismo origen y tipos MIME, puente simulado), pero **no se instaló en un
+  teléfono ni en un emulador** (el entorno de desarrollo no tiene aceleración para emularlo): la
+  cámara, el selector de archivos y el guardado en Descargas no están probados en un dispositivo.
 * La migración Android se probó con una base **sintética** que reproduce el esquema Room v1, no con la
   base real de un teléfono. La app Android no se pudo compilar en este entorno.
 * No se calcula la **tolerancia** del error de cierre de la nivelación ni se compensa: el docente no
