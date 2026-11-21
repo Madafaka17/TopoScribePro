@@ -10,7 +10,13 @@ enum class Hemisphere { N, S }
  * campo que habilita un punto como referencia de cierre en los cálculos. */
 enum class PointRole { CONTROL, POLIGONAL, RELLENO, OTRO }
 
-enum class DataSource { CONTROL_OFICIAL, MEDIDO_GNSS, IMPORTADO, OTRO }
+enum class DataSource { CONTROL_OFICIAL, MEDIDO_GNSS, IMPORTADO, OTRO, LOCAL_DECLARADO }
+
+/** Tipo de anexo elegido por el usuario (independiente del tipo de archivo/MIME). */
+enum class AnnexKind(val labelEs: String) {
+    CROQUIS("Croquis"), FICHA_CAMPO("Ficha de campo"), DOCUMENTO_PDF("Documento PDF"), FOTO_GENERAL("Fotografía general"), OTRO("Otro respaldo"),
+}
+
 
 enum class FixType { FIXED, FLOAT, DGPS, AUTONOMO }
 

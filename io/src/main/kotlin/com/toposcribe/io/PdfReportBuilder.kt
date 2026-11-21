@@ -2,384 +2,510 @@ package com.toposcribe.io
 
 import android.graphics.Color
 import android.graphics.Paint
+import android.graphics.RectF
 import android.graphics.Typeface
 import android.graphics.pdf.PdfDocument
-import com.toposcribe.calc.PlanData
+import com.toposcribe.calc.AnnexFileKind
+import com.toposcribe.calc.PlanLayer
+import com.toposcribe.calc.ReportAnnex
 import com.toposcribe.calc.ReportData
-import com.toposcribe.calc.ReportLevelingCheck
-import com.toposcribe.calc.ReportPhoto
-import com.toposcribe.calc.ReportProjectInfo
-import com.toposcribe.calc.ReportTraverseClosure
+import com.toposcribe.calc.ReportLevelRun
+import com.toposcribe.calc.ReportRadiationStation
+import com.toposcribe.calc.ResultState
 import java.io.ByteArrayOutputStream
+import java.io.File
+
+/** Máximo de páginas de un PDF anexo que se incorporan al informe (el resto queda en el respaldo). */
+const val MAX_EMBEDDED_PDF_PAGES_PER_ANNEX = 30
+
+/** Qué pasó con cada anexo al armar el PDF: nunca se dice «adjunto» si no lo está. */
+data class AnnexEmbedStatus(
+    val annex: ReportAnnex,
+    val embedded: Boolean,
+    val pagesEmbedded: Int,
+    val totalPages: Int?,
+    val note: String,
+)
+
+data class PdfBuildResult(val bytes: ByteArray, val pageCount: Int, val annexStatuses: List<AnnexEmbedStatus>)
+
+private val SECTION_TITLES = listOf(
+    "1. Portada y datos generales",
+    "2. Memoria descriptiva",
+    "3. Libretas de campo originales",
+    "4. Memoria de cálculo de altimetría",
+    "5. Memoria de cálculo de planimetría por radiación",
+    "6. Tabla final de puntos y perfil longitudinal",
+    "7. Plano y curvas de nivel",
+    "8. Panel fotográfico por punto",
+    "9. Anexos",
+    "10. Observaciones, datos pendientes y limitaciones",
+)
+
+private class Ctx(
+    val data: ReportData,
+    val fonts: PdfFonts,
+    val cursor: PdfCursor,
+    val heavy: Boolean,
+    val sectionPages: MutableMap<String, Int>,
+    val tocPages: Map<String, Int>,
+    val annexStatuses: List<AnnexEmbedStatus>,
+)
 
 /**
- * Generador del informe PDF, en Kotlin puro de Android (android.graphics.pdf.PdfDocument, sin
- * librerías de terceros). Replica EXACTAMENTE las 4 secciones ya verificadas en la versión web
- * (PDFKit/pdfmake, ver server/src/importExport/pdfReport.ts en topografia-app): 1) Memoria
- * descriptiva, 2) Memoria de cálculo, 3) Planos, 4) Panel fotográfico.
- *
- * Nota sobre fuentes y Unicode: la versión web usaba Helvetica estándar + WinAnsiEncoding, que NO
- * soporta letras griegas (Δ, Σ, α...) ni el signo menos Unicode (−) -- se corrompían en el PDF
- * exportado y hubo que armar sanitizeForPdf() (ver PdfLayoutHelpers.kt) para reemplazarlos por
- * texto ASCII legible antes de pasarlos a PDFKit. Acá dibujamos con Canvas.drawText sobre un
- * Typeface de un .ttf real (Inter), que sí tiene buena cobertura Unicode y probablemente no
- * necesita el saneo -- pero se aplica igual como red de seguridad barata para el caso en que se
- * corra sin esa fuente cargada (fallback a Typeface.DEFAULT, que podría no tener esos glifos).
+ * Informe de levantamiento topográfico, en dos pasadas: la primera mide (sin decodificar imágenes)
+ * para conocer el total de páginas y la página de cada sección; la segunda dibuja con «Página N de T»
+ * y el contenido con números de página reales.
  */
-fun buildReportPdf(
-    data: ReportData,
-    regularTypeface: Typeface,
-    boldTypeface: Typeface,
-    monoTypeface: Typeface,
-): ByteArray {
-    val document = PdfDocument()
-    val fonts = PdfFonts(regularTypeface, boldTypeface, monoTypeface)
-    val cursor = PdfCursor(document)
+fun buildReportPdf(data: ReportData, regular: Typeface, bold: Typeface, mono: Typeface): PdfBuildResult {
+    val fonts = PdfFonts(regular, bold, mono)
+    val statuses = evaluateAnnexes(data.annexes)
+    val footer = "Informe de levantamiento topográfico · ${data.project.name.ifBlank { "(proyecto sin nombre)" }}"
 
-    drawTitleAndBanner(cursor, fonts, data)
-    drawSection1DescriptiveMemory(cursor, fonts, data.project)
-    drawSection2CalculationMemory(cursor, fonts, data)
-    drawSection3Plans(cursor, fonts, data.planData)
-    drawSection4PhotoPanel(cursor, fonts, data.photos)
+    // Pasada 1 (medición)
+    val sections1 = LinkedHashMap<String, Int>()
+    val doc1 = PdfDocument()
+    val c1 = PdfCursor(doc1, fonts, footer, null)
+    renderAll(Ctx(data, fonts, c1, false, sections1, emptyMap(), statuses))
+    c1.finish()
+    val total = c1.pageCount
+    doc1.close()
 
+    // Pasada 2 (definitiva)
+    val doc = PdfDocument()
+    val sections2 = LinkedHashMap<String, Int>()
+    val cursor = PdfCursor(doc, fonts, footer, total)
+    renderAll(Ctx(data, fonts, cursor, true, sections2, sections1, statuses))
     cursor.finish()
-    val output = ByteArrayOutputStream()
-    document.writeTo(output)
-    document.close()
-    return output.toByteArray()
+    val out = ByteArrayOutputStream()
+    doc.writeTo(out)
+    doc.close()
+    return PdfBuildResult(out.toByteArray(), total, statuses)
 }
 
-/** Cualquier campo nulo o vacío se imprime literalmente así -- nunca se omite la fila ni se
- * inventa contenido (principio de fondo de toda la app: nunca se inventa un dato). */
+// ---------------------------------------------------------------------------------------------
+
 private fun pending(value: String?): String {
-    val trimmed = value?.trim()
-    return if (trimmed.isNullOrEmpty()) "(pendiente de completar)" else trimmed
+    val t = value?.trim()
+    return if (t.isNullOrEmpty()) "(pendiente de completar)" else t
 }
 
-// ---------------------------------------------------------------------------------------------
-// Título + banner de datos de demostración
-// ---------------------------------------------------------------------------------------------
+private fun Ctx.startSection(title: String, newPage: Boolean = true) {
+    if (newPage && cursor.y > MARGIN + 1f) cursor.newPage()
+    sectionPages[title] = cursor.pageNumber
+    cursor.drawSectionHeader(title, fonts)
+}
 
-private fun drawTitleAndBanner(cursor: PdfCursor, fonts: PdfFonts, data: ReportData) {
+private fun renderAll(ctx: Ctx) {
+    drawCover(ctx)
+    drawDescriptiveMemory(ctx)
+    drawFieldBooks(ctx)
+    drawLevelingMemory(ctx)
+    drawRadiationMemory(ctx)
+    drawFinalTableAndProfile(ctx)
+    drawPlanSection(ctx)
+    drawPhotoPanel(ctx)
+    drawAnnexes(ctx)
+    drawObservations(ctx)
+}
+
+// 1. Portada ------------------------------------------------------------------------------------
+
+private fun drawCover(ctx: Ctx) = with(ctx) {
+    val p = data.project
+    sectionPages[SECTION_TITLES[0]] = 1
+    cursor.y = MARGIN + 30f
     cursor.drawTextLine("Informe de levantamiento topográfico", MARGIN, fonts.title)
-    cursor.y += 2f
-    cursor.drawWrappedParagraph(data.project.name, MARGIN, CONTENT_WIDTH, fonts.subtitle)
-    cursor.y += 8f
-    if (data.project.isDemo) {
-        drawWarningBanner(cursor, fonts, "DATOS DE DEMOSTRACIÓN — este proyecto no representa un levantamiento real.")
+    cursor.y += 4f
+    cursor.drawWrappedParagraph(p.name.ifBlank { "(proyecto sin nombre)" }, MARGIN, CONTENT_WIDTH, fonts.subtitle)
+    cursor.y += 10f
+    if (p.isDemo) cursor.drawBanner("PROYECTO MARCADO COMO DEMOSTRACIÓN — no representa un levantamiento real.", fonts)
+    if (data.planState == ResultState.DESACTUALIZADO || data.levelRuns.any { it.state == ResultState.DESACTUALIZADO }) {
+        cursor.drawBanner("ATENCIÓN: hay resultados DESACTUALIZADOS (se modificaron lecturas después del último cálculo). Las cifras guardadas pueden no corresponder a las lecturas vigentes.", fonts)
     }
-}
-
-private fun drawWarningBanner(cursor: PdfCursor, fonts: PdfFonts, text: String) {
-    val sanitized = sanitizeForPdf(text)
-    val paint = fonts.warning
-    val innerWidth = (CONTENT_WIDTH - 16f).toInt()
-    val layout = buildStaticLayout(sanitized, paint, innerWidth)
-    val boxHeight = layout.height + 12f
-    cursor.ensureSpace(boxHeight + 10f)
-    val top = cursor.y
-    val bgPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.rgb(0xff, 0xf4, 0xd6); style = Paint.Style.FILL }
-    val borderPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.rgb(0x8a, 0x53, 0x00)
-        style = Paint.Style.STROKE
-        strokeWidth = 1f
-    }
-    cursor.canvas.drawRect(MARGIN, top, MARGIN + CONTENT_WIDTH, top + boxHeight, bgPaint)
-    cursor.canvas.drawRect(MARGIN, top, MARGIN + CONTENT_WIDTH, top + boxHeight, borderPaint)
-    cursor.canvas.save()
-    cursor.canvas.translate(MARGIN + 8f, top + 6f)
-    layout.draw(cursor.canvas)
-    cursor.canvas.restore()
-    cursor.y = top + boxHeight + 10f
-}
-
-// ---------------------------------------------------------------------------------------------
-// 1. Memoria descriptiva
-// ---------------------------------------------------------------------------------------------
-
-private fun drawSection1DescriptiveMemory(cursor: PdfCursor, fonts: PdfFonts, project: ReportProjectInfo) {
-    cursor.drawSectionHeader("1. Memoria descriptiva", fonts)
-
-    // "Estación total — Leica TS06": instrumentTypeLabel siempre presente, el modelo concreto
-    // (instrument) se agrega solo si viene informado. Se copia a un val local porque Kotlin no
-    // permite smart-cast de una propiedad nullable declarada en otro módulo (:calc) aunque sea val.
-    val instrument = project.instrument
-    val instrumentText = if (!instrument.isNullOrBlank()) {
-        "${project.instrumentTypeLabel} — ${instrument.trim()}"
-    } else {
-        project.instrumentTypeLabel
-    }
-
-    val rows = listOf(
-        "Finalidad" to project.purpose,
-        "Ubicación" to project.location,
-        "Características del lugar" to project.siteCharacteristics,
-        "Fecha" to project.date,
-        "Responsable(s)" to project.responsible,
-        "Instrumento" to instrumentText,
-        "Sistema de coordenadas" to project.coordinateSystemText,
-        "Unidades" to "${project.unitsDistance} / ${project.unitsAngle}",
-        "Procedimiento de campo" to project.fieldProcedure,
-        "Observaciones" to project.observations,
-    )
-
+    cursor.drawSubHeader("Datos generales", fonts)
     cursor.drawTable(
-        fonts,
-        columns = listOf(TableColumn("", 0.32f), TableColumn("", 0.68f)),
-        rows = rows.map { (label, value) -> listOf(label, pending(value)) },
+        fonts, listOf(TableColumn("", 0.30f), TableColumn("", 0.70f)),
+        listOf(
+            listOf("Proyecto", pending(p.name)),
+            listOf("Objetivo del levantamiento", pending(p.purpose)),
+            listOf("Ubicación", pending(p.location)),
+            listOf("Fecha del levantamiento", pending(p.date)),
+            listOf("Responsable(s)", pending(p.responsible)),
+            listOf("Instrumentos", p.instruments),
+            listOf("Sistema de coordenadas", pending(p.coordinateSystem)),
+            listOf("Unidades", "Distancias en ${p.unitsDistance}; ángulos en ${p.unitsAngle}"),
+            listOf("Informe generado", data.generatedAt),
+            listOf("Aplicación", "TopoScribe Pro ${data.appVersion}"),
+        ),
+        showHeader = false,
+    )
+    cursor.y += 10f
+    cursor.drawSubHeader("Contenido", fonts)
+    val rows = SECTION_TITLES.map { t -> listOf(t, (tocPages[t] ?: sectionPages[t] ?: 0).takeIf { it > 0 }?.toString() ?: "") }
+    cursor.drawTable(fonts, listOf(TableColumn("", 0.88f), TableColumn("", 0.12f, alignRight = true)), rows, showHeader = false)
+}
+
+// 2. Memoria descriptiva --------------------------------------------------------------------------
+
+private fun drawDescriptiveMemory(ctx: Ctx) = with(ctx) {
+    val p = data.project
+    startSection(SECTION_TITLES[1])
+    cursor.drawWrappedParagraph(
+        "Los campos que el responsable no completó se indican como «pendiente de completar»: la aplicación no inventa información del lugar ni del trabajo.",
+        MARGIN, CONTENT_WIDTH, fonts.caption,
+    )
+    cursor.y += 4f
+    cursor.drawTable(
+        fonts, listOf(TableColumn("", 0.30f), TableColumn("", 0.70f)),
+        listOf(
+            listOf("Objetivo", pending(p.purpose)),
+            listOf("Ubicación", pending(p.location)),
+            listOf("Descripción del terreno", pending(p.terrainDescription)),
+            listOf("Procedimiento de campo realizado", pending(p.fieldProcedure)),
+            listOf("Instrumentos utilizados", p.instruments),
+            listOf("Responsable(s)", pending(p.responsible)),
+            listOf("Fecha", pending(p.date)),
+            listOf("Sistema de coordenadas", pending(p.coordinateSystem)),
+            listOf("Observaciones generales", pending(p.observations)),
+        ),
         showHeader = false,
     )
 }
 
-// ---------------------------------------------------------------------------------------------
-// 2. Memoria de cálculo
-// ---------------------------------------------------------------------------------------------
+// 3. Libretas originales ---------------------------------------------------------------------------
 
-private fun drawSection2CalculationMemory(cursor: PdfCursor, fonts: PdfFonts, data: ReportData) {
-    cursor.drawSectionHeader("2. Memoria de cálculo", fonts)
+private fun drawFieldBooks(ctx: Ctx) = with(ctx) {
+    startSection(SECTION_TITLES[2])
+    cursor.drawWrappedParagraph("Datos tal como se ingresaron en campo. Las lecturas corregidas muestran el valor original y el vigente.", MARGIN, CONTENT_WIDTH, fonts.caption)
 
-    if (data.formulasUsed.isNotEmpty()) {
-        cursor.drawSubHeader("Metodología (fórmulas usadas en este proyecto)", fonts)
-        for (formula in data.formulasUsed) {
-            cursor.drawBulletItem("${formula.labelEs}: ${formula.formulaText} (${formula.reference})", fonts.body)
-        }
+    cursor.drawSubHeader("3.1 Libreta de nivelación (nivel de ingeniero)", fonts)
+    if (data.levelRuns.isEmpty()) {
+        cursor.drawWrappedParagraph("No hay nivelaciones registradas.", MARGIN, CONTENT_WIDTH, fonts.bodyItalic)
+    }
+    for (run in data.levelRuns) {
+        cursor.keepTogether(60f)
+        cursor.drawWrappedParagraph(
+            "Nivelación «${run.name}» — BM inicial ${run.startBmCode} (cota ${fmt(run.startElevation)})" +
+                (run.endBmCode?.let { " — BM final $it" + (run.knownEndElevation?.let { k -> " (cota ${fmt(k)})" } ?: "") } ?: ""),
+            MARGIN, CONTENT_WIDTH, fonts.bodyBold,
+        )
+        cursor.drawTable(
+            fonts,
+            listOf(TableColumn("N°", 0.06f), TableColumn("Est.", 0.06f), TableColumn("Punto", 0.14f), TableColumn("Tipo", 0.07f),
+                TableColumn("Lectura", 0.12f, mono = true, alignRight = true), TableColumn("Dist. parcial", 0.12f, mono = true, alignRight = true),
+                TableColumn("P. cambio", 0.08f), TableColumn("Observación / corrección", 0.35f)),
+            run.inputRows.map { r ->
+                listOf(
+                    r.sequence.toString(), r.station.toString(), r.pointCode, r.typeLabel, fmt(r.reading),
+                    if (r.partialDistance == null) "—" else fmt(r.partialDistance),
+                    if (r.turningPoint) "Sí" else "",
+                    listOfNotNull(r.notes?.takeIf { it.isNotBlank() }, r.correction).joinToString(" · "),
+                )
+            },
+        )
+        cursor.y += 6f
+    }
+
+    cursor.drawSubHeader("3.2 Libreta de radiación (teodolito)", fonts)
+    if (data.radiationStations.isEmpty()) cursor.drawWrappedParagraph("No hay estaciones con radiaciones registradas.", MARGIN, CONTENT_WIDTH, fonts.bodyItalic)
+    for (st in data.radiationStations) {
+        cursor.keepTogether(70f)
+        cursor.drawWrappedParagraph(
+            "Estación ${st.stationCode} — ${stationCoordText(st)} — ${st.coordinateOrigin}" + (st.instrumentHeight?.let { " — altura del instrumento ${fmt(it)}" } ?: ""),
+            MARGIN, CONTENT_WIDTH, fonts.bodyBold,
+        )
+        cursor.drawWrappedParagraph("Orientación: ${st.orientationText}", MARGIN, CONTENT_WIDTH, fonts.body)
+        cursor.drawTable(
+            fonts,
+            listOf(TableColumn("Punto", 0.12f), TableColumn("Lectura original (horizontal · vertical · distancia)", 0.46f), TableColumn("Descripción", 0.22f), TableColumn("Corrección", 0.20f)),
+            st.rows.map { r -> listOf(r.code, r.originalReading, r.description?.takeIf { it.isNotBlank() } ?: "—", r.correction ?: "") },
+        )
+        cursor.y += 6f
+    }
+}
+
+private fun stationCoordText(st: ReportRadiationStation): String =
+    if (st.stationEast == null || st.stationNorth == null) "coordenadas no conocidas" else "E = ${fmt(st.stationEast)}, N = ${fmt(st.stationNorth)}"
+
+// 4. Memoria de cálculo de altimetría ---------------------------------------------------------------
+
+private fun drawLevelingMemory(ctx: Ctx) = with(ctx) {
+    startSection(SECTION_TITLES[3])
+    cursor.drawWrappedParagraph("HI = cota de referencia + VA   ·   Cota = HI − VI (o − VD)   ·   Comprobación: Σ VA − Σ VD = cota final − cota inicial.", MARGIN, CONTENT_WIDTH, fonts.bodyMono)
+    if (data.levelRuns.isEmpty()) cursor.drawWrappedParagraph("No hay nivelaciones calculadas.", MARGIN, CONTENT_WIDTH, fonts.bodyItalic)
+    for (run in data.levelRuns) {
+        cursor.drawSubHeader("Nivelación «${run.name}»", fonts)
+        if (run.state != ResultState.ACTUALIZADO) cursor.drawBanner("Estado del cálculo: ${run.state.labelEs}.", fonts)
+        cursor.drawTable(
+            fonts,
+            listOf(TableColumn("Est.", 0.05f), TableColumn("Punto", 0.11f), TableColumn("Tipo", 0.06f), TableColumn("Lectura", 0.10f, mono = true, alignRight = true),
+                TableColumn("Dist. parcial", 0.10f, mono = true, alignRight = true), TableColumn("Dist. acum.", 0.10f, mono = true, alignRight = true),
+                TableColumn("Operación", 0.30f, mono = true), TableColumn("Cota", 0.12f, mono = true, alignRight = true)),
+            run.calcRows.map { r ->
+                listOf(r.station.toString(), r.pointCode, r.typeLabel, fmt(r.reading),
+                    if (r.partialDistance == null) "—" else fmt(r.partialDistance),
+                    if (r.cumulativeDistance == null) "—" else fmt(r.cumulativeDistance),
+                    r.operation, fmt(r.elevation))
+            },
+        )
         cursor.y += 4f
-    }
-
-    cursor.drawSubHeader("Tabla de resultados", fonts)
-    val resultColumns = listOf(
-        TableColumn("Código", 0.10f),
-        TableColumn("Descripción", 0.20f),
-        TableColumn("Este", 0.12f, mono = true),
-        TableColumn("Norte", 0.12f, mono = true),
-        TableColumn("Cota", 0.12f, mono = true),
-        TableColumn("Tipo", 0.10f),
-        TableColumn("Origen", 0.24f),
-    )
-    val resultRows = data.results.map { r ->
-        listOf(
-            r.code,
-            r.description?.trim()?.takeIf { it.isNotEmpty() } ?: "—",
-            fmt(r.east),
-            fmt(r.north),
-            fmt(r.elevation),
-            r.roleLabel,
-            r.origin,
+        val delta = run.finalElevation - run.startElevation
+        cursor.drawBulletItem("Σ VA = ${fmt(run.sumBacksight)};  Σ VD = ${fmt(run.sumForesight)};  Σ VA − Σ VD = ${fmt(run.sumBacksight - run.sumForesight)}", fonts.body)
+        cursor.drawBulletItem("Diferencia de cotas calculadas = ${fmt(run.finalElevation)} − ${fmt(run.startElevation)} = ${fmt(delta)}", fonts.body)
+        cursor.drawBulletItem(
+            if (run.arithmeticCheckOk) "Comprobación aritmética CONFORME (la suma de vistas coincide con la diferencia de cotas)."
+            else "Comprobación aritmética NO CONFORME: la suma de vistas no coincide con la diferencia de cotas; revise la libreta.",
+            if (run.arithmeticCheckOk) fonts.body else fonts.bodyBold,
         )
-    }
-    cursor.drawTable(fonts, resultColumns, resultRows, showHeader = true)
-    cursor.y += 6f
-
-    if (data.levelingChecks.isNotEmpty() || data.traverseClosures.isNotEmpty()) {
-        cursor.drawSubHeader("Comprobaciones y cierres", fonts)
-    }
-
-    for (check in data.levelingChecks) {
-        drawLevelingCheck(cursor, fonts, check)
-    }
-    for (closure in data.traverseClosures) {
-        drawTraverseClosure(cursor, fonts, closure)
-    }
-}
-
-/** Distingue deliberadamente dos comprobaciones distintas: la aritmética (ΣBS-ΣFS = cota final -
- * inicial) es una identidad que siempre se cumple si la libreta está bien sumada; el cierre de
- * campo contra una cota de cierre conocida es la verificación real de error de campo, y solo
- * existe si hay una cota de cierre independiente -- si no la hay, se explica por qué en vez de
- * inventar o callar el resultado. */
-private fun drawLevelingCheck(cursor: PdfCursor, fonts: PdfFonts, check: ReportLevelingCheck) {
-    val diff = check.finalElevation - check.startElevation
-    val checkLine = "Nivelación \"${check.runName}\": ΣBS=${fmt(check.sumBacksight)}, ΣFS=${fmt(check.sumForesight)}, " +
-        "ΣBS−ΣFS=${fmt(check.checkValue)}; cota final − inicial=${fmt(diff)} (${fmt(check.startElevation)} → ${fmt(check.finalElevation)}). " +
-        if (check.arithmeticCheckOk) "Comprobación de libreta conforme." else "Comprobación de libreta NO conforme: revisar la libreta."
-    cursor.drawWrappedParagraph(checkLine, MARGIN, CONTENT_WIDTH, fonts.body)
-    cursor.y += 2f
-
-    val closureLine = if (check.fieldMisclosure != null) {
-        "Cierre de campo contra cota de cierre conocida (${fmt(check.knownEndElevation)}): error = ${fmt(check.fieldMisclosure)}."
-    } else {
-        "No se calculó cierre de campo: esta nivelación no tiene una cota de cierre conocida independiente."
-    }
-    cursor.drawWrappedParagraph(closureLine, MARGIN, CONTENT_WIDTH, fonts.body)
-    cursor.y += 6f
-}
-
-private fun drawTraverseClosure(cursor: PdfCursor, fonts: PdfFonts, closure: ReportTraverseClosure) {
-    var line = "Poligonal \"${closure.traverseName}\" (${closure.typeLabel}): fE=${fmt(closure.fE)}, fN=${fmt(closure.fN)}, " +
-        "fL=${fmt(closure.fL)}, precisión relativa ${closure.relativePrecision}"
-    if (closure.angularMisclosureDeg != null) {
-        line += ", cierre angular=${fmt(closure.angularMisclosureDeg, 5)}°"
-    }
-    cursor.drawWrappedParagraph(line, MARGIN, CONTENT_WIDTH, fonts.body)
-    cursor.y += 2f
-
-    if (closure.stations.isNotEmpty()) {
-        cursor.drawWrappedParagraph(
-            "Coordenadas originales (bruto) y corregidas (ajuste Bowditch) por estación:",
-            MARGIN,
-            CONTENT_WIDTH,
-            fonts.bodyItalic,
-        )
-        cursor.y += 2f
-        val columns = listOf(
-            TableColumn("Punto", 0.16f),
-            TableColumn("Este bruto", 0.21f, mono = true),
-            TableColumn("Norte bruto", 0.21f, mono = true),
-            TableColumn("Este corregido", 0.21f, mono = true),
-            TableColumn("Norte corregido", 0.21f, mono = true),
-        )
-        val rows = closure.stations.map { s ->
-            listOf(s.pointCode, fmt(s.rawEast), fmt(s.rawNorth), fmt(s.adjustedEast), fmt(s.adjustedNorth))
-        }
-        cursor.drawTable(fonts, columns, rows, showHeader = true)
-    }
-    cursor.y += 6f
-}
-
-// ---------------------------------------------------------------------------------------------
-// 3. Planos
-// ---------------------------------------------------------------------------------------------
-
-private fun drawSection3Plans(cursor: PdfCursor, fonts: PdfFonts, planData: PlanData) {
-    cursor.drawSectionHeader("3. Planos", fonts)
-
-    if (planData.points.isEmpty()) {
-        cursor.drawWrappedParagraph(
-            "Este proyecto no tiene puntos con coordenadas calculadas todavía.",
-            MARGIN,
-            CONTENT_WIDTH,
+        cursor.drawBulletItem(
+            if (run.misclosure != null && run.knownEndElevation != null)
+                "Error de cierre contra ${run.endBmCode ?: "el BM final"} (cota conocida ${fmt(run.knownEndElevation)}): ${fmt(run.finalElevation)} − ${fmt(run.knownEndElevation)} = ${fmt(run.misclosure)}."
+            else "No existe BM final de cota conocida: el cierre contra control externo no puede comprobarse.",
             fonts.body,
         )
-    } else {
-        drawPlanDrawing(cursor, fonts, planData)
-    }
-
-    if (planData.pointsWithoutCoords > 0) {
-        cursor.y += 2f
-        cursor.drawWrappedParagraph(
-            "${planData.pointsWithoutCoords} punto(s) sin coordenadas calculadas no se muestran.",
-            MARGIN,
-            CONTENT_WIDTH,
-            fonts.caption,
-        )
-    }
-}
-
-/** Dibuja puntos + líneas de planData con UNA ÚNICA escala uniforme calculada desde el bounding
- * box de los puntos (nunca escalas X/Y independientes, deformaría el dibujo). Si todos los puntos
- * comparten la misma coordenada en un eje (línea perfectamente vertical/horizontal, o un solo
- * punto), ese eje degenerado simplemente no participa en el cálculo de la escala -- se sigue
- * usando un único número de escala, solo que elegido a partir del eje que sí tiene extensión. */
-private fun drawPlanDrawing(cursor: PdfCursor, fonts: PdfFonts, planData: PlanData) {
-    val drawHeight = 440f
-    cursor.ensureSpace(drawHeight + 8f)
-    val top = cursor.y
-    val left = MARGIN
-    val width = CONTENT_WIDTH
-
-    val borderPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.rgb(0xcc, 0xcc, 0xcc)
-        style = Paint.Style.STROKE
-        strokeWidth = 0.75f
-    }
-    cursor.canvas.drawRect(left, top, left + width, top + drawHeight, borderPaint)
-
-    val points = planData.points
-    val minE = points.minOf { it.east }
-    val maxE = points.maxOf { it.east }
-    val minN = points.minOf { it.north }
-    val maxN = points.maxOf { it.north }
-    val pad = 24f
-    val rawW = maxE - minE
-    val rawH = maxN - minN
-
-    val scaleCandidates = mutableListOf<Float>()
-    if (rawW > 1e-9) scaleCandidates.add((width - 2 * pad) / rawW.toFloat())
-    if (rawH > 1e-9) scaleCandidates.add((drawHeight - 2 * pad) / rawH.toFloat())
-    val scale = scaleCandidates.minOrNull() ?: 1f
-
-    val contentW = rawW.toFloat() * scale
-    val contentH = rawH.toFloat() * scale
-    val offsetX = left + pad + ((width - 2 * pad) - contentW) / 2f
-    val offsetY = top + pad + ((drawHeight - 2 * pad) - contentH) / 2f
-
-    fun toX(e: Double) = offsetX + (e - minE).toFloat() * scale
-    fun toY(n: Double) = offsetY + contentH - (n - minN).toFloat() * scale // Norte hacia arriba: Y de canvas invertida.
-
-    val pointById = points.associateBy { it.pointId }
-    val linePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.rgb(0x33, 0x33, 0x33)
-        style = Paint.Style.STROKE
-        strokeWidth = 0.8f
-    }
-    for (planLine in planData.lines) {
-        val a = pointById[planLine.fromPointId] ?: continue
-        val b = pointById[planLine.toPointId] ?: continue
-        cursor.canvas.drawLine(toX(a.east), toY(a.north), toX(b.east), toY(b.north), linePaint)
-    }
-
-    val dotPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.rgb(0x1a, 0x1a, 0x1a); style = Paint.Style.FILL }
-    for (p in points) {
-        val px = toX(p.east)
-        val py = toY(p.north)
-        cursor.canvas.drawCircle(px, py, 2f, dotPaint)
-        cursor.canvas.drawText(sanitizeForPdf(p.code), px + 4f, py - 4f, fonts.planLabel)
-    }
-
-    cursor.y = top + drawHeight + 6f
-}
-
-// ---------------------------------------------------------------------------------------------
-// 4. Panel fotográfico
-// ---------------------------------------------------------------------------------------------
-
-private fun drawSection4PhotoPanel(cursor: PdfCursor, fonts: PdfFonts, photos: List<ReportPhoto>) {
-    cursor.drawSectionHeader("4. Panel fotográfico", fonts)
-
-    if (photos.isEmpty()) {
-        cursor.drawWrappedParagraph("Este proyecto no tiene puntos registrados.", MARGIN, CONTENT_WIDTH, fonts.body)
-        return
-    }
-
-    for (photo in photos) {
+        run.warnings.forEach { cursor.drawBulletItem("Advertencia: $it", fonts.pending) }
         cursor.y += 6f
-        cursor.drawRichParagraph(buildCaptionTokens(photo, fonts), MARGIN, CONTENT_WIDTH)
-        cursor.y += 2f
+    }
+}
 
-        // null, archivo inexistente o no decodificable = SIN foto; nunca se inventa/reemplaza por
-        // una imagen de relleno.
-        val bitmap = decodeBitmapFitted(photo.photoFilePath)
-        if (bitmap != null) {
-            cursor.drawFittedBitmap(bitmap, IMAGE_BOX_W, IMAGE_BOX_H)
-            bitmap.recycle()
-            val caption = photo.caption // val local: smart-cast no aplica a propiedades de otro módulo.
-            if (!caption.isNullOrBlank()) {
-                cursor.drawWrappedParagraph(caption, MARGIN, CONTENT_WIDTH, fonts.caption)
+// 5. Memoria de cálculo de planimetría --------------------------------------------------------------
+
+private fun drawRadiationMemory(ctx: Ctx) = with(ctx) {
+    startSection(SECTION_TITLES[4])
+    cursor.drawWrappedParagraph("A = azimut desde el norte en sentido horario · ΔE = d·sen(A) · ΔN = d·cos(A) · E₂ = E₁ + ΔE · N₂ = N₁ + ΔN", MARGIN, CONTENT_WIDTH, fonts.bodyMono)
+    if (data.planState != ResultState.ACTUALIZADO) cursor.drawBanner("Estado del cálculo de planimetría: ${data.planState.labelEs}.", fonts)
+    if (data.radiationStations.isEmpty()) cursor.drawWrappedParagraph("No hay radiaciones calculadas.", MARGIN, CONTENT_WIDTH, fonts.bodyItalic)
+    for (st in data.radiationStations) {
+        cursor.drawSubHeader("Estación ${st.stationCode}", fonts)
+        cursor.drawWrappedParagraph("${stationCoordText(st)} — ${st.coordinateOrigin}. Orientación: ${st.orientationText}", MARGIN, CONTENT_WIDTH, fonts.body)
+        cursor.y += 3f
+        cursor.drawTable(
+            fonts,
+            listOf(TableColumn("Punto", 0.10f), TableColumn("Azimut", 0.20f, mono = true), TableColumn("d usada", 0.12f, mono = true, alignRight = true),
+                TableColumn("ΔE", 0.12f, mono = true, alignRight = true), TableColumn("ΔN", 0.12f, mono = true, alignRight = true),
+                TableColumn("Este", 0.17f, mono = true, alignRight = true), TableColumn("Norte", 0.17f, mono = true, alignRight = true)),
+            st.rows.map { r -> listOf(r.code, r.azimuthText ?: "—", fmt(r.distanceUsed), fmt(r.deltaE), fmt(r.deltaN), fmt(r.east), fmt(r.north)) },
+        )
+        cursor.y += 4f
+        cursor.drawSubHeader("Operaciones con valores sustituidos", fonts)
+        for (r in st.rows) {
+            cursor.keepTogether(fonts.bodyMono.fontSpacing * 3 + 4f)
+            cursor.drawTextLine("${r.code}${r.description?.takeIf { it.isNotBlank() }?.let { " — $it" } ?: ""}", MARGIN, fonts.bodyBold)
+            if (r.errors.isNotEmpty()) r.errors.forEach { cursor.drawWrappedParagraph("No calculado: $it", MARGIN + 8f, CONTENT_WIDTH - 8f, fonts.pending) }
+            r.formulaLines.forEach { cursor.drawWrappedParagraph(it, MARGIN + 8f, CONTENT_WIDTH - 8f, fonts.bodyMono) }
+            cursor.y += 3f
+        }
+    }
+}
+
+// 6. Tabla final y perfil longitudinal ------------------------------------------------------------------
+
+private fun drawFinalTableAndProfile(ctx: Ctx) = with(ctx) {
+    startSection(SECTION_TITLES[5])
+    cursor.drawSubHeader("6.1 Tabla final de puntos", fonts)
+    cursor.drawWrappedParagraph("Valores calculados a partir de las lecturas; la columna «Origen de la cota» indica si procede del nivel de ingeniero o de un control conocido.", MARGIN, CONTENT_WIDTH, fonts.caption)
+    cursor.y += 2f
+    cursor.drawTable(
+        fonts,
+        listOf(TableColumn("Código", 0.10f), TableColumn("Descripción", 0.22f), TableColumn("Procedimiento", 0.12f), TableColumn("Este", 0.14f, mono = true, alignRight = true),
+            TableColumn("Norte", 0.14f, mono = true, alignRight = true), TableColumn("Cota", 0.12f, mono = true, alignRight = true), TableColumn("Origen de la cota", 0.16f)),
+        data.points.map { r -> listOf(r.code, r.description?.takeIf { it.isNotBlank() } ?: "—", r.procedure, fmt(r.east), fmt(r.north), fmt(r.elevation), r.elevationSource) },
+    )
+    cursor.y += 8f
+    cursor.drawSubHeader("6.2 Perfil longitudinal", fonts)
+    if (data.levelRuns.isEmpty()) cursor.drawWrappedParagraph("No hay nivelaciones: no se dibuja perfil longitudinal.", MARGIN, CONTENT_WIDTH, fonts.bodyItalic)
+    for (run in data.levelRuns) {
+        cursor.keepTogether(280f)
+        cursor.drawTextLine("Nivelación «${run.name}»", MARGIN, fonts.bodyBold)
+        val prof = run.profile
+        if (!prof.valid) {
+            cursor.drawBanner("Perfil no dibujado: ${prof.reason ?: "datos insuficientes"}", fonts)
+            if (prof.incomplete.isNotEmpty()) {
+                cursor.drawTable(fonts, listOf(TableColumn("Punto incompleto", 0.3f), TableColumn("Falta", 0.7f)), prof.incomplete.map { listOf(it.code, it.missing) })
             }
+            continue
+        }
+        val h = 220f
+        val rect = RectF(MARGIN, cursor.y, MARGIN + CONTENT_WIDTH, cursor.y + h)
+        val plotWidthMm = (CONTENT_WIDTH - 60f) * 25.4 / 72.0
+        var scales: ProfileScales? = null
+        if (heavy) scales = ProfileRenderer.draw(cursor.canvas, prof, data.project.unitsDistance, rect, PlanStyle(1f, fonts.regularTypeface), plotWidthMm)
+        else scales = ProfileRenderer.scalesFor(prof, plotWidthMm, plotWidthMm * (h - 38f) / (CONTENT_WIDTH - 60f))
+        cursor.y += h + 2f
+        cursor.drawWrappedParagraph(scales?.text() ?: "", MARGIN, CONTENT_WIDTH, fonts.caption)
+        cursor.y += 4f
+    }
+}
+
+// 7. Plano y curvas ---------------------------------------------------------------------------------------
+
+private fun drawPlanSection(ctx: Ctx) = with(ctx) {
+    startSection(SECTION_TITLES[6])
+    val plan = data.plan
+    if (data.planState != ResultState.ACTUALIZADO) cursor.drawBanner("Estado del cálculo de planimetría: ${data.planState.labelEs}.", fonts)
+    if (plan.points.isEmpty()) {
+        cursor.drawWrappedParagraph("Este proyecto no tiene puntos con coordenadas calculadas: no hay plano que mostrar.", MARGIN, CONTENT_WIDTH, fonts.bodyItalic)
+    } else {
+        val h = 470f
+        cursor.ensureSpace(h + 10f)
+        val rect = RectF(MARGIN, cursor.y, MARGIN + CONTENT_WIDTH, cursor.y + h)
+        val bounds = plan.bounds()!!
+        val vp = PlanRenderer.fit(bounds, rect, 42f)
+        if (heavy) {
+            cursor.canvas.drawRect(rect, Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.rgb(0xcc, 0xcc, 0xcc); style = Paint.Style.STROKE; strokeWidth = 0.75f })
+            val style = PlanStyle(1f, fonts.regularTypeface)
+            val layers = plan.availableLayers()
+            PlanRenderer.draw(cursor.canvas, plan, layers, vp, rect, style)
+            PlanRenderer.drawFurniture(cursor.canvas, plan, layers, vp, rect, style, PlanRenderer.scaleDenominator(vp.scale, if (plan.unitsDistance == "ft") 0.3048 else 1.0))
+        }
+        cursor.y += h + 6f
+        if (plan.pointsWithoutCoordinates > 0) cursor.drawWrappedParagraph("${plan.pointsWithoutCoordinates} punto(s) sin coordenadas calculadas no se muestran en el plano.", MARGIN, CONTENT_WIDTH, fonts.caption)
+    }
+    cursor.drawSubHeader("Curvas de nivel", fonts)
+    val c = data.contourSummary
+    if (c.applicable) {
+        cursor.drawBulletItem("Equidistancia ${fmt(c.equidistance)} ${data.project.unitsDistance}; ${c.levels} nivel(es); ${c.usedPoints} punto(s) con Este, Norte y cota.", fonts.body)
+        cursor.drawBulletItem("Método: ${c.method}.", fonts.body)
+        cursor.drawBulletItem("Capas del plano: " + PlanLayer.entries.filter { it in plan.availableLayers() }.joinToString { it.labelEs } + ".", fonts.body)
+    } else {
+        cursor.drawBanner("No se generaron curvas de nivel: ${c.reason ?: "datos insuficientes"}", fonts)
+    }
+}
+
+// 8. Panel fotográfico -------------------------------------------------------------------------------------
+
+private const val PHOTO_BOX_W = 300f
+private const val PHOTO_BOX_H = 225f
+
+private fun drawPhotoPanel(ctx: Ctx) = with(ctx) {
+    startSection(SECTION_TITLES[7])
+    if (data.photos.isEmpty()) { cursor.drawWrappedParagraph("Este proyecto no tiene puntos registrados.", MARGIN, CONTENT_WIDTH, fonts.bodyItalic); return@with }
+    cursor.drawWrappedParagraph("Puntos en orden de código. Las fotografías se muestran completas, sin recortes ni deformación.", MARGIN, CONTENT_WIDTH, fonts.caption)
+    for (entry in data.photos) {
+        val file = entry.photoFilePath?.let { File(it) }
+        val size = file?.let { imageDisplaySize(it) }
+        cursor.keepTogether(if (size != null) 40f + PHOTO_BOX_H else 40f)
+        cursor.y += 6f
+        val title = entry.code + (entry.description?.takeIf { it.isNotBlank() }?.let { " — ${it.trim()}" } ?: "")
+        cursor.drawWrappedParagraph(title, MARGIN, CONTENT_WIDTH, fonts.bodyBold)
+        cursor.y += 2f
+        if (size != null) {
+            drawFittedImage(this, file!!, size, PHOTO_BOX_W, PHOTO_BOX_H)
+            entry.caption?.takeIf { it.isNotBlank() }?.let { cursor.drawWrappedParagraph("Pie de foto: $it", MARGIN, CONTENT_WIDTH, fonts.caption) }
         } else {
-            cursor.drawWrappedParagraph("Sin fotografía registrada.", MARGIN, CONTENT_WIDTH, fonts.bodyItalic)
+            cursor.drawWrappedParagraph("Sin fotografía registrada", MARGIN, CONTENT_WIDTH, fonts.bodyItalic)
         }
         cursor.y += 4f
     }
 }
 
-private fun buildCaptionTokens(photo: ReportPhoto, fonts: PdfFonts): List<RichToken> {
-    val tokens = mutableListOf<RichToken>()
-    sanitizeForPdf(photo.code).split(" ").filter { it.isNotEmpty() }.forEach {
-        tokens.add(RichToken(it, fonts.bodyBold))
-    }
-
-    val description = photo.description // vals locales: smart-cast no aplica a propiedades de otro módulo.
-    val segment = photo.segment
-    val restParts = mutableListOf<String>()
-    if (!description.isNullOrBlank()) restParts.add("— ${description.trim()}")
-    if (!segment.isNullOrBlank()) restParts.add("· Tramo: ${segment.trim()}")
-    if (photo.chainage != null) restParts.add("· Progresiva: ${fmt(photo.chainage)}")
-
-    if (restParts.isNotEmpty()) {
-        sanitizeForPdf(restParts.joinToString(" ")).split(" ").filter { it.isNotEmpty() }.forEach {
-            tokens.add(RichToken(it, fonts.body))
+/** Reserva el alto exacto que ocuparía la imagen encajada; la decodifica y dibuja solo en la pasada definitiva. */
+private fun drawFittedImage(ctx: Ctx, file: File, size: Pair<Int, Int>, maxW: Float, maxH: Float, maxSide: Int = 1400) {
+    val scale = minOf(maxW / size.first, maxH / size.second)
+    val w = size.first * scale; val h = size.second * scale
+    ctx.cursor.ensureSpace(h)
+    if (ctx.heavy) {
+        val bmp = decodeOriented(file, maxSide)
+        if (bmp != null) {
+            val dst = RectF(MARGIN, ctx.cursor.y, MARGIN + w, ctx.cursor.y + h)
+            ctx.cursor.canvas.drawBitmap(bmp, null, dst, Paint(Paint.FILTER_BITMAP_FLAG or Paint.ANTI_ALIAS_FLAG))
+            ctx.cursor.canvas.drawRect(dst, Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.rgb(0xcc, 0xcc, 0xcc); style = Paint.Style.STROKE; strokeWidth = 0.5f })
+            bmp.recycle()
         }
     }
-    return tokens
+    ctx.cursor.y += h + 2f
+}
+
+// 9. Anexos ----------------------------------------------------------------------------------------------------
+
+internal fun evaluateAnnexes(annexes: List<ReportAnnex>): List<AnnexEmbedStatus> = annexes.map { a ->
+    val file = File(a.filePath)
+    when {
+        !file.isFile -> AnnexEmbedStatus(a, false, 0, null, "No incorporado: el archivo no se encontró en el dispositivo.")
+        a.kind == AnnexFileKind.IMAGE -> {
+            if (imageDisplaySize(file) != null) AnnexEmbedStatus(a, true, 1, 1, "Incorporado al PDF (1 página).")
+            else AnnexEmbedStatus(a, false, 0, null, "No incorporado: la imagen no se pudo leer (archivo dañado). Se conserva en el respaldo.")
+        }
+        a.kind == AnnexFileKind.PDF -> {
+            val n = PdfFiles.pageCount(file)
+            when {
+                n == null -> AnnexEmbedStatus(a, false, 0, null, "No incorporado: el PDF no se pudo abrir (dañado o protegido con contraseña). Se conserva en el respaldo.")
+                n > MAX_EMBEDDED_PDF_PAGES_PER_ANNEX -> AnnexEmbedStatus(a, true, MAX_EMBEDDED_PDF_PAGES_PER_ANNEX, n,
+                    "Incorporado parcialmente: primeras $MAX_EMBEDDED_PDF_PAGES_PER_ANNEX de $n páginas; el documento completo está en el respaldo.")
+                else -> AnnexEmbedStatus(a, true, n, n, "Incorporado al PDF ($n página${if (n == 1) "" else "s"}).")
+            }
+        }
+        else -> AnnexEmbedStatus(a, false, 0, null, "No incorporado: este formato no se puede insertar en el PDF. Se conserva como archivo descargable en el respaldo del proyecto.")
+    }
+}
+
+private fun drawAnnexes(ctx: Ctx) = with(ctx) {
+    startSection(SECTION_TITLES[8])
+    cursor.drawSubHeader("Índice de anexos", fonts)
+    if (annexStatuses.isEmpty()) {
+        cursor.drawWrappedParagraph("Este proyecto no tiene anexos registrados.", MARGIN, CONTENT_WIDTH, fonts.bodyItalic)
+        return@with
+    }
+    cursor.drawTable(
+        fonts,
+        listOf(TableColumn("N°", 0.05f), TableColumn("Título", 0.20f), TableColumn("Archivo original", 0.18f), TableColumn("Tipo", 0.10f),
+            TableColumn("Fecha", 0.09f), TableColumn("Relación", 0.12f), TableColumn("Estado en este PDF", 0.26f)),
+        annexStatuses.map { s ->
+            val a = s.annex
+            listOf(a.number.toString(), a.title, a.originalName, a.typeLabel, a.addedAt.take(10), a.relatedTo ?: "—", s.note)
+        },
+    )
+    cursor.y += 6f
+    for (s in annexStatuses.filter { !it.annex.description.isNullOrBlank() }) {
+        cursor.drawBulletItem("Anexo ${s.annex.number} — ${s.annex.title}: ${s.annex.description!!.trim()}", fonts.body)
+    }
+
+    // Contenido incorporable: una página por imagen / por página de PDF
+    for (s in annexStatuses.filter { it.embedded }) {
+        val a = s.annex
+        val file = File(a.filePath)
+        when (a.kind) {
+            AnnexFileKind.IMAGE -> {
+                cursor.newPage()
+                annexPageHeader(this, a, "")
+                val size = imageDisplaySize(file)
+                if (size != null) drawFittedImage(this, file, size, CONTENT_WIDTH, BODY_BOTTOM - cursor.y - 6f, 2000)
+            }
+            AnnexFileKind.PDF -> {
+                val pages = (0 until s.pagesEmbedded).toList()
+                if (heavy) {
+                    PdfFiles.renderPages(file, pages, (CONTENT_WIDTH / 72f * 150f).toInt()) { i, bmp ->
+                        cursor.newPage()
+                        annexPageHeader(this, a, "página ${i + 1} de ${s.totalPages}")
+                        if (bmp != null) {
+                            cursor.drawFittedBitmap(bmp, CONTENT_WIDTH, BODY_BOTTOM - cursor.y - 6f, centered = true)
+                            bmp.recycle()
+                        } else cursor.drawWrappedParagraph("No se pudo dibujar esta página del documento.", MARGIN, CONTENT_WIDTH, fonts.pending)
+                    }
+                } else {
+                    pages.forEach { _ -> cursor.newPage() } // medición: una página por página incorporada
+                }
+            }
+            AnnexFileKind.OTHER -> Unit
+        }
+    }
+}
+
+private fun annexPageHeader(ctx: Ctx, a: ReportAnnex, extra: String) = with(ctx) {
+    ctx.sectionPages.putIfAbsent("anexo-${a.number}", cursor.pageNumber)
+    cursor.drawTextLine("Anexo ${a.number} — ${a.title}" + if (extra.isNotEmpty()) " ($extra)" else "", MARGIN, fonts.subHeader)
+    cursor.drawWrappedParagraph("${a.originalName} · ${a.typeLabel} · incorporado el ${a.addedAt.take(10)}" + (a.relatedTo?.let { " · relacionado con $it" } ?: ""), MARGIN, CONTENT_WIDTH, fonts.caption)
+    cursor.y += 4f
+}
+
+// 10. Observaciones, datos pendientes y limitaciones ---------------------------------------------------------------
+
+private fun drawObservations(ctx: Ctx) = with(ctx) {
+    startSection(SECTION_TITLES[9])
+    cursor.drawSubHeader("Observaciones del responsable", fonts)
+    cursor.drawWrappedParagraph(pending(data.project.observations), MARGIN, CONTENT_WIDTH, fonts.body)
+    cursor.drawSubHeader("Datos pendientes y limitaciones detectados por la aplicación", fonts)
+    if (data.pendingItems.isEmpty()) cursor.drawWrappedParagraph("No se detectaron datos pendientes.", MARGIN, CONTENT_WIDTH, fonts.body)
+    data.pendingItems.forEach { cursor.drawBulletItem(it, fonts.body) }
 }

@@ -4,13 +4,14 @@ package com.toposcribe.app.data.repository
  * compensada por Bowditch coexisten a propósito). La de mayor prioridad se usa como resultado
  * "principal" para cálculos posteriores; las demás siguen disponibles para el toggle antes/después. */
 object MethodPriority {
+    // Un dato fijo (BM, estación o control con valor conocido) manda sobre cualquier valor calculado.
     val ORDER = listOf(
+        "dato_fijo",
         "poligonal_bowditch",
         "poligonal_bruto",
         "radiacion",
         "nivelacion_geometrica",
         "nivelacion_trigonometrica",
-        "dato_fijo",
     )
 
     fun rank(method: String): Int {
@@ -21,10 +22,10 @@ object MethodPriority {
     val LABELS_ES: Map<String, String> = mapOf(
         "poligonal_bowditch" to "Poligonal (compensado Bowditch)",
         "poligonal_bruto" to "Poligonal (bruto)",
-        "radiacion" to "Radiación",
-        "nivelacion_geometrica" to "Nivelación geométrica",
+        "radiacion" to "Radiación (teodolito)",
+        "nivelacion_geometrica" to "Nivel de ingeniero",
         "nivelacion_trigonometrica" to "Nivelación trigonométrica",
-        "dato_fijo" to "Punto de control",
+        "dato_fijo" to "Control conocido",
     )
 
     fun label(method: String): String = LABELS_ES[method] ?: method

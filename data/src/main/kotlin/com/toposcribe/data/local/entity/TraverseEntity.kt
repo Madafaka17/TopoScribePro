@@ -5,8 +5,10 @@ import androidx.room.Entity
 import androidx.room.ForeignKey
 import androidx.room.Index
 import androidx.room.PrimaryKey
+import kotlinx.serialization.Serializable
 import com.toposcribe.calc.TraverseType
 
+@Serializable
 @Entity(
     tableName = "traverses",
     foreignKeys = [

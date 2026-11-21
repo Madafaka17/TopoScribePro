@@ -5,7 +5,9 @@ import androidx.room.Entity
 import androidx.room.ForeignKey
 import androidx.room.Index
 import androidx.room.PrimaryKey
+import kotlinx.serialization.Serializable
 
+@Serializable
 @Entity(
     tableName = "points",
     foreignKeys = [
@@ -27,6 +29,8 @@ data class PointEntity(
     val code: String,
     val description: String? = null,
     val observations: String? = null,
+    /** Instrumento o procedimiento relacionado: NIVEL, TEODOLITO, CONTROL u OTRO. */
+    @ColumnInfo(name = "instrument_ref") val instrumentRef: String? = null,
     @ColumnInfo(name = "tramo_sector") val tramoSector: String? = null,
     @ColumnInfo(name = "is_control") val isControl: Boolean = false,
     val role: PointRole = PointRole.OTRO,

@@ -10,6 +10,7 @@ import kotlinx.serialization.Serializable
 @Serializable
 data class PointCorrection(val pointId: Long, val correctionE: Double, val correctionN: Double)
 
+@Serializable
 @Entity(
     tableName = "adjustments",
     foreignKeys = [

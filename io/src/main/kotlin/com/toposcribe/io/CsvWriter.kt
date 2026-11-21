@@ -1,14 +1,14 @@
-package com.toposcribe.io
+﻿package com.toposcribe.io
 
-/** Escritor CSV genérico (encabezados + filas de texto) -- la correspondencia dominio->fila la arma
- * quien llama (en :app), este escritor no conoce ninguna entidad del dominio. RFC 4180 básico:
- * entrecomilla un campo solo si contiene coma, comillas o salto de línea. */
-fun buildCsv(headers: List<String>, rows: List<List<String>>): String {
+/**
+ * Escritor CSV (RFC 4180 básico): entrecomilla un campo solo si contiene coma, comillas o salto de
+ * línea. [withBom] antepone el BOM UTF-8 para que Excel muestre bien los acentos.
+ */
+fun buildCsv(headers: List<String>, rows: List<List<String>>, withBom: Boolean = true): String {
     val sb = StringBuilder()
+    if (withBom) sb.append('\uFEFF')
     sb.append(headers.joinToString(",") { escapeCsvField(it) }).append("\r\n")
-    for (row in rows) {
-        sb.append(row.joinToString(",") { escapeCsvField(it) }).append("\r\n")
-    }
+    for (row in rows) sb.append(row.joinToString(",") { escapeCsvField(it) }).append("\r\n")
     return sb.toString()
 }
 

@@ -5,8 +5,10 @@ import androidx.room.Entity
 import androidx.room.ForeignKey
 import androidx.room.Index
 import androidx.room.PrimaryKey
+import kotlinx.serialization.Serializable
 import com.toposcribe.calc.ReadingType
 
+@Serializable
 @Entity(
     tableName = "leveling_observations",
     foreignKeys = [
@@ -26,6 +28,8 @@ data class LevelingObservationEntity(
     @ColumnInfo(name = "reading_type") val readingType: ReadingType,
     @ColumnInfo(name = "reading_value") val readingValue: Double,
     @ColumnInfo(name = "is_turning_point") val isTurningPoint: Boolean = false,
+    /** Distancia parcial desde el punto anterior del recorrido (VI y VD). La acumulada se calcula. */
+    @ColumnInfo(name = "partial_distance") val partialDistance: Double? = null,
     @ColumnInfo(name = "observation_date") val observationDate: String? = null,
     @ColumnInfo(name = "raw_notes") val rawNotes: String? = null,
     @ColumnInfo(name = "photo_path") val photoPath: String? = null,

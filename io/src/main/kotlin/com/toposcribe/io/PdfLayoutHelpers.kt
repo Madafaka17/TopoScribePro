@@ -1,7 +1,6 @@
 package com.toposcribe.io
 
 import android.graphics.Bitmap
-import android.graphics.BitmapFactory
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
@@ -11,141 +10,128 @@ import android.graphics.pdf.PdfDocument
 import android.text.Layout
 import android.text.StaticLayout
 import android.text.TextPaint
-import java.io.File
 import java.util.Locale
 import kotlin.math.min
 
 /**
- * Utilidades de bajo nivel para armar el PDF con android.graphics.pdf.PdfDocument a mano (sin
- * librerías de terceros): manejo de página/cursor Y, estilos de texto reutilizables, saneo de
- * caracteres Unicode problemáticos, formateo numérico y un motor de tablas genérico. La lógica de
- * CONTENIDO (qué dice cada sección) vive en PdfReportBuilder.kt; este archivo solo sabe dibujar.
+ * Utilidades de bajo nivel para armar el PDF con android.graphics.pdf.PdfDocument (sin librerías de
+ * terceros): cursor Y con paginación y pie de página numerado, estilos de texto, saneo de
+ * caracteres, tablas con repetición de encabezado e imágenes encajadas SIN deformar ni recortar.
+ * El CONTENIDO de cada sección vive en PdfReportBuilder.kt.
  */
 
-internal const val PAGE_WIDTH = 595f // A4 en puntos (72 pt/in), igual a la versión web (pageMargins/tamaño de pdfmake).
+internal const val PAGE_WIDTH = 595f // A4 en puntos (72 pt/in)
 internal const val PAGE_HEIGHT = 842f
 internal const val MARGIN = 36f
 internal const val CONTENT_WIDTH = PAGE_WIDTH - 2 * MARGIN
-
-internal const val IMAGE_BOX_W = 220f
-internal const val IMAGE_BOX_H = 160f
-
-// ---------------------------------------------------------------------------------------------
-// Saneo de caracteres Unicode (red de seguridad, ver PdfReportBuilder.kt para el porqué completo)
-// ---------------------------------------------------------------------------------------------
+internal const val FOOTER_HEIGHT = 22f
+internal const val BODY_BOTTOM = PAGE_HEIGHT - MARGIN - FOOTER_HEIGHT
 
 private val PDF_SAFE_REPLACEMENTS: Map<Char, String> = mapOf(
-    'Δ' to "d", 'δ' to "d",
-    'Σ' to "Sum ", 'σ' to "sum ",
+    'Δ' to "d", 'δ' to "d", 'Σ' to "Sum ", 'σ' to "sum ",
     'α' to "alfa", 'β' to "beta", 'γ' to "gamma", 'θ' to "theta", 'π' to "pi",
-    '−' to "-", '→' to "->", '←' to "<-",
-    '′' to "'", '″' to "\"",
+    '−' to "-", '→' to "->", '←' to "<-", '′' to "'", '″' to "\"",
 )
 
-/** Reemplaza solo el puñado de caracteres que se sabe que fallaban con fuentes sin buena cobertura
- * Unicode (ver comentario largo en PdfReportBuilder.kt). El resto de Unicode (acentos, ñ, °, —,
- * etc.) se deja intacto. */
+/**
+ * Red de seguridad: reemplaza los pocos caracteres que fallan si la fuente embebida no los trae.
+ * Con Inter (cobertura completa de griego y signos matemáticos) no se aplica; solo se usa si el
+ * tipo de letra cargado es el del sistema.
+ */
 internal fun sanitizeForPdf(text: String): String {
     if (text.none { PDF_SAFE_REPLACEMENTS.containsKey(it) }) return text
     val sb = StringBuilder(text.length)
-    for (ch in text) {
-        val replacement = PDF_SAFE_REPLACEMENTS[ch]
-        if (replacement != null) sb.append(replacement) else sb.append(ch)
-    }
+    for (ch in text) sb.append(PDF_SAFE_REPLACEMENTS[ch] ?: ch.toString())
     return sb.toString()
 }
 
-/** Formatea un valor numérico opcional con punto decimal fijo (Locale.US, nunca coma decimal
- * dependiente del locale del dispositivo), o un guion largo "—" si es null -- igual convención que
- * la versión web (fmt() en pdfReport.ts). */
 internal fun fmt(value: Double?, digits: Int = 3): String =
     if (value == null) "—" else String.format(Locale.US, "%.${digits}f", value)
 
-// ---------------------------------------------------------------------------------------------
-// Estilos de texto
-// ---------------------------------------------------------------------------------------------
-
-/** Paletas de Paint reutilizables por tipo de texto, construidas una sola vez a partir de los 3
- * Typeface recibidos desde :app. monoTypeface SOLO se usa en bodyMono (columnas numéricas/
- * coordenadas) -- nunca como tipografía general, siguiendo la misma convención del resto de la app. */
 internal class PdfFonts(regular: Typeface, bold: Typeface, mono: Typeface) {
     private fun make(tf: Typeface, size: Float, color: Int = Color.BLACK, italic: Boolean = false): TextPaint =
         TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
-            typeface = tf
-            textSize = size
-            this.color = color
-            if (italic) textSkewX = -0.25f // Inter/mono no traen un archivo itálico propio: cursiva falsa vía skew.
+            typeface = tf; textSize = size; this.color = color
+            if (italic) textSkewX = -0.25f
         }
 
-    val title = make(bold, 16f)
-    val subtitle = make(regular, 12f)
+    val regularTypeface = regular
+    val title = make(bold, 22f)
+    val subtitle = make(regular, 13f)
     val sectionHeader = make(bold, 13f)
-    val subHeader = make(bold, 11f)
+    val subHeader = make(bold, 10.5f)
     val body = make(regular, 8f)
     val bodyBold = make(bold, 8f)
     val bodyItalic = make(regular, 8f, italic = true)
-    val bodyMono = make(mono, 8f)
+    val bodyMono = make(mono, 7.5f)
     val caption = make(regular, 8f, color = Color.rgb(0x5b, 0x64, 0x72), italic = true)
-    val warning = make(bold, 10f, color = Color.rgb(0x8a, 0x53, 0x00))
+    val warning = make(bold, 9f, color = Color.rgb(0x8a, 0x53, 0x00))
     val tableHeader = make(bold, 8f)
-    val planLabel = make(regular, 7f)
+    val footer = make(regular, 7f, color = Color.rgb(0x5b, 0x64, 0x72))
+    val pending = make(regular, 8f, color = Color.rgb(0xa3, 0x39, 0x00), italic = true)
 
-    val hairline: Paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.rgb(0xdd, 0xdd, 0xdd)
-        strokeWidth = 0.5f
-    }
+    val hairline: Paint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.rgb(0xdd, 0xdd, 0xdd); strokeWidth = 0.5f }
 }
 
-// ---------------------------------------------------------------------------------------------
-// Paginación: cursor Y + página de PdfDocument
-// ---------------------------------------------------------------------------------------------
-
-/** Maneja el cursor Y y el ciclo de vida de startPage/finishPage de PdfDocument. Quien dibuja
- * llama ensureSpace(altoDelBloque) antes de cada bloque (encabezado, fila de tabla, imagen, línea
- * de texto); si no entra antes del margen inferior, se cierra la página actual y se abre una nueva. */
-internal class PdfCursor(private val document: PdfDocument) {
+/**
+ * Cursor Y + ciclo de vida de las páginas. Cada página termina con un pie «Informe… · Página N de T».
+ * [totalPages] es null en la primera pasada (se imprime «?») y el total real en la segunda.
+ */
+internal class PdfCursor(
+    private val document: PdfDocument,
+    private val fonts: PdfFonts,
+    private val footerLeft: String,
+    private val totalPages: Int?,
+) {
     var y: Float = MARGIN
-    private var pageNumber = 1
+    var pageNumber = 1
+        private set
     private var page: PdfDocument.Page = newPdfPage()
     val canvas: Canvas get() = page.canvas
+    val pageCount: Int get() = pageNumber
 
     private fun newPdfPage(): PdfDocument.Page {
         val info = PdfDocument.PageInfo.Builder(PAGE_WIDTH.toInt(), PAGE_HEIGHT.toInt(), pageNumber).create()
         return document.startPage(info)
     }
 
+    private fun drawFooter() {
+        val c = page.canvas
+        val lineY = PAGE_HEIGHT - MARGIN - FOOTER_HEIGHT + 6f
+        c.drawLine(MARGIN, lineY, PAGE_WIDTH - MARGIN, lineY, fonts.hairline)
+        val textY = lineY + 11f
+        c.drawText(sanitizeForPdf(footerLeft), MARGIN, textY, fonts.footer)
+        val right = "Página $pageNumber de ${totalPages ?: "?"}"
+        c.drawText(right, PAGE_WIDTH - MARGIN - fonts.footer.measureText(right), textY, fonts.footer)
+    }
+
     fun newPage() {
+        drawFooter()
         document.finishPage(page)
         pageNumber += 1
         page = newPdfPage()
         y = MARGIN
     }
 
-    /** Devuelve true si tuvo que abrir una página nueva (para que drawTable pueda repetir el
-     * encabezado de la tabla en la página siguiente). */
+    /** true si tuvo que abrir una página nueva (para repetir encabezados de tabla). */
     fun ensureSpace(height: Float): Boolean {
-        if (y + height > PAGE_HEIGHT - MARGIN) {
-            newPage()
-            return true
-        }
+        if (y + height > BODY_BOTTOM) { newPage(); return true }
         return false
     }
 
+    /** Si lo que queda de página es menos de [height], salta de página (para no dejar un título huérfano). */
+    fun keepTogether(height: Float) { ensureSpace(height) }
+
     fun finish() {
+        drawFooter()
         document.finishPage(page)
     }
 }
 
-// ---------------------------------------------------------------------------------------------
-// Texto: línea simple, párrafo con wrap consciente de paginación, viñetas, línea con tramo en negrita
-// ---------------------------------------------------------------------------------------------
-
 internal fun buildStaticLayout(text: String, paint: TextPaint, width: Int): StaticLayout {
     val w = width.coerceAtLeast(1)
     return StaticLayout.Builder.obtain(text, 0, text.length, paint, w)
-        .setAlignment(Layout.Alignment.ALIGN_NORMAL)
-        .setIncludePad(false)
-        .build()
+        .setAlignment(Layout.Alignment.ALIGN_NORMAL).setIncludePad(false).build()
 }
 
 internal fun PdfCursor.drawTextLine(text: String, x: Float, paint: TextPaint) {
@@ -155,182 +141,121 @@ internal fun PdfCursor.drawTextLine(text: String, x: Float, paint: TextPaint) {
 }
 
 internal fun PdfCursor.drawSectionHeader(text: String, fonts: PdfFonts) {
+    ensureSpace(fonts.sectionHeader.fontSpacing + 40f)
     y += 10f
     drawTextLine(text, MARGIN, fonts.sectionHeader)
-    y += 4f
+    canvas.drawLine(MARGIN, y + 1f, MARGIN + CONTENT_WIDTH, y + 1f, fonts.hairline)
+    y += 6f
 }
 
 internal fun PdfCursor.drawSubHeader(text: String, fonts: PdfFonts) {
+    ensureSpace(fonts.subHeader.fontSpacing + 28f)
     y += 6f
     drawTextLine(text, MARGIN, fonts.subHeader)
     y += 2f
 }
 
-/** Párrafo con wrap de palabras dentro de maxWidth, dibujado línea por línea y con chequeo de
- * paginación POR LÍNEA (no por párrafo entero) -- así un campo de texto libre largo (Observaciones,
- * por ejemplo) puede fluir correctamente entre dos páginas en vez de desbordar el margen inferior. */
+/** Párrafo con wrap, con control de paginación POR LÍNEA para que un texto largo fluya entre páginas. */
 internal fun PdfCursor.drawWrappedParagraph(text: String, x: Float, maxWidth: Float, paint: TextPaint) {
     val sanitized = sanitizeForPdf(text)
     if (sanitized.isEmpty()) return
     val layout = buildStaticLayout(sanitized, paint, maxWidth.toInt())
     val lineHeight = paint.fontSpacing
     for (i in 0 until layout.lineCount) {
-        val start = layout.getLineStart(i)
-        val end = layout.getLineEnd(i)
-        val lineText = sanitized.substring(start, end).trimEnd()
+        val lineText = sanitized.substring(layout.getLineStart(i), layout.getLineEnd(i)).trimEnd()
         ensureSpace(lineHeight)
         canvas.drawText(lineText, x, y - paint.ascent(), paint)
         y += lineHeight
     }
 }
 
-/** Ítem de lista con viñeta "•" y sangría colgante en las líneas de continuación si el texto hace wrap. */
 internal fun PdfCursor.drawBulletItem(text: String, paint: TextPaint) {
-    val bulletIndent = 14f
-    val textX = MARGIN + bulletIndent
-    val maxWidth = CONTENT_WIDTH - bulletIndent
+    val bulletIndent = 12f
     val sanitized = sanitizeForPdf(text)
-    val layout = buildStaticLayout(sanitized, paint, maxWidth.toInt())
+    val layout = buildStaticLayout(sanitized, paint, (CONTENT_WIDTH - bulletIndent).toInt())
     val lineHeight = paint.fontSpacing
     for (i in 0 until layout.lineCount) {
-        val start = layout.getLineStart(i)
-        val end = layout.getLineEnd(i)
-        val lineText = sanitized.substring(start, end).trimEnd()
+        val lineText = sanitized.substring(layout.getLineStart(i), layout.getLineEnd(i)).trimEnd()
         ensureSpace(lineHeight)
         if (i == 0) canvas.drawText("•", MARGIN, y - paint.ascent(), paint)
-        canvas.drawText(lineText, textX, y - paint.ascent(), paint)
+        canvas.drawText(lineText, MARGIN + bulletIndent, y - paint.ascent(), paint)
         y += lineHeight
     }
     y += 1f
 }
 
-/** Un fragmento de texto con su propio Paint, para armar una línea con parte en negrita y el resto
- * en texto normal (p. ej. "**CÓDIGO** — descripción..." del panel fotográfico). */
-internal data class RichToken(val text: String, val paint: TextPaint)
+internal data class TableColumn(val header: String, val weight: Float, val mono: Boolean = false, val alignRight: Boolean = false)
 
-/** Dibuja una secuencia de tokens (ya saneados por el llamador) como un párrafo con wrap de
- * palabras, cada token con su propio Paint, avanzando x y haciendo saltos de línea/página según
- * haga falta. Se usa para mezclar negrita + texto normal en una misma línea lógica. */
-internal fun PdfCursor.drawRichParagraph(tokens: List<RichToken>, x: Float, maxWidth: Float) {
-    if (tokens.isEmpty()) return
-    val lineHeight = tokens.maxOf { it.paint.fontSpacing }
-    val spaceWidth = tokens.first().paint.measureText(" ")
-    ensureSpace(lineHeight)
-    var cursorX = x
-    var atLineStart = true
-    for (token in tokens) {
-        val tokenWidth = token.paint.measureText(token.text)
-        val needed = (if (atLineStart) 0f else spaceWidth) + tokenWidth
-        if (!atLineStart && cursorX + needed > x + maxWidth) {
-            y += lineHeight
-            ensureSpace(lineHeight)
-            cursorX = x
-            atLineStart = true
-        }
-        if (!atLineStart) cursorX += spaceWidth
-        canvas.drawText(token.text, cursorX, y - token.paint.ascent(), token.paint)
-        cursorX += tokenWidth
-        atLineStart = false
-    }
-    y += lineHeight
-}
-
-// ---------------------------------------------------------------------------------------------
-// Tabla genérica (clave-valor, resultados, estaciones de poligonal)
-// ---------------------------------------------------------------------------------------------
-
-internal data class TableColumn(val header: String, val weight: Float, val mono: Boolean = false)
-
-/** Motor de tabla genérico: columnas proporcionales al ancho de contenido, cada celda puede
- * envolver en varias líneas (la altura de fila es la celda más alta), y si una fila cae justo en
- * el borde de página se repite el encabezado en la página siguiente para no perder el contexto. */
-internal fun PdfCursor.drawTable(fonts: PdfFonts, columns: List<TableColumn>, rows: List<List<String>>, showHeader: Boolean) {
-    val colWidths = columns.map { it.weight * CONTENT_WIDTH }
+/** Tabla genérica: columnas proporcionales, celdas con wrap, encabezado repetido en cada página. */
+internal fun PdfCursor.drawTable(fonts: PdfFonts, columns: List<TableColumn>, rows: List<List<String>>, showHeader: Boolean = true) {
+    val total = columns.sumOf { it.weight.toDouble() }.toFloat()
+    val colWidths = columns.map { it.weight / total * CONTENT_WIDTH }
     val colX = FloatArray(columns.size)
     var acc = MARGIN
-    for (i in columns.indices) {
-        colX[i] = acc
-        acc += colWidths[i]
-    }
-    val padX = 4f
-    val padY = 3f
+    for (i in columns.indices) { colX[i] = acc; acc += colWidths[i] }
+    val padX = 3f
+    val padY = 2.5f
 
     fun drawHeaderRow() {
         val paint = fonts.tableHeader
-        ensureSpace(paint.fontSpacing + 2 * padY)
+        val layouts = columns.mapIndexed { i, c -> buildStaticLayout(sanitizeForPdf(c.header), paint, (colWidths[i] - 2 * padX).toInt()) }
+        val h = layouts.maxOf { it.lineCount } * paint.fontSpacing + 2 * padY
+        ensureSpace(h)
         val top = y
         for (i in columns.indices) {
-            canvas.drawText(sanitizeForPdf(columns[i].header), colX[i] + padX, top + padY - paint.ascent(), paint)
+            canvas.save(); canvas.translate(colX[i] + padX, top + padY); layouts[i].draw(canvas); canvas.restore()
         }
-        y = top + paint.fontSpacing + 2 * padY
-        canvas.drawLine(MARGIN, y, MARGIN + CONTENT_WIDTH, y, fonts.hairline)
+        y = top + h
+        canvas.drawLine(MARGIN, y, MARGIN + CONTENT_WIDTH, y, Paint(fonts.hairline).apply { color = Color.rgb(0x88, 0x88, 0x88) })
     }
 
     if (showHeader) drawHeaderRow()
-
     for (row in rows) {
-        val cellPaints = columns.map { if (it.mono) fonts.bodyMono else fonts.body }
+        val paints = columns.map { if (it.mono) fonts.bodyMono else fonts.body }
         val layouts = row.mapIndexed { i, text ->
-            val w = (colWidths[i] - 2 * padX).toInt()
-            buildStaticLayout(sanitizeForPdf(text), cellPaints[i], w)
+            val p = paints[i]
+            StaticLayout.Builder.obtain(sanitizeForPdf(text), 0, sanitizeForPdf(text).length, p, (colWidths[i] - 2 * padX).toInt().coerceAtLeast(1))
+                .setAlignment(if (columns[i].alignRight) Layout.Alignment.ALIGN_OPPOSITE else Layout.Alignment.ALIGN_NORMAL)
+                .setIncludePad(false).build()
         }
-        val rowHeight = layouts.indices.maxOf { i -> layouts[i].lineCount * cellPaints[i].fontSpacing } + 2 * padY
-        val brokePage = ensureSpace(rowHeight)
-        if (brokePage && showHeader) drawHeaderRow()
+        val rowHeight = layouts.indices.maxOf { i -> layouts[i].lineCount * paints[i].fontSpacing } + 2 * padY
+        val broke = ensureSpace(rowHeight)
+        if (broke && showHeader) drawHeaderRow()
         val top = y
         for (i in layouts.indices) {
-            canvas.save()
-            canvas.translate(colX[i] + padX, top + padY)
-            layouts[i].draw(canvas)
-            canvas.restore()
+            canvas.save(); canvas.translate(colX[i] + padX, top + padY); layouts[i].draw(canvas); canvas.restore()
         }
         y = top + rowHeight
         canvas.drawLine(MARGIN, y, MARGIN + CONTENT_WIDTH, y, fonts.hairline)
     }
 }
 
-// ---------------------------------------------------------------------------------------------
-// Imágenes (panel fotográfico): decodificación defensiva + dibujo preservando proporción
-// ---------------------------------------------------------------------------------------------
-
-private const val IMAGE_DECODE_TARGET_W = 660 // ~3x la caja de 220pt, para que no se vea pixelada al imprimir/zoom.
-private const val IMAGE_DECODE_TARGET_H = 480
-
-/** Intenta decodificar una foto de forma defensiva: archivo inexistente, no legible, corrupto o
- * que se queda sin memoria al decodificar nunca tira abajo el informe completo -- simplemente se
- * trata como "sin fotografía" (nunca se inventa/reemplaza por un placeholder). Usa inSampleSize
- * para no cargar fotos de cámara a resolución completa en memoria innecesariamente. */
-internal fun decodeBitmapFitted(path: String?): Bitmap? {
-    if (path.isNullOrBlank()) return null
-    return try {
-        val file = File(path)
-        if (!file.isFile) return null
-        val boundsOpts = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-        BitmapFactory.decodeFile(path, boundsOpts)
-        val w = boundsOpts.outWidth
-        val h = boundsOpts.outHeight
-        if (w <= 0 || h <= 0) return null
-        var sample = 1
-        while (w / (sample * 2) >= IMAGE_DECODE_TARGET_W && h / (sample * 2) >= IMAGE_DECODE_TARGET_H) {
-            sample *= 2
-        }
-        val opts = BitmapFactory.Options().apply { inSampleSize = sample }
-        BitmapFactory.decodeFile(path, opts)
-    } catch (e: Exception) {
-        null
-    } catch (e: OutOfMemoryError) {
-        null
-    }
-}
-
-/** Dibuja el bitmap encajado dentro de maxW x maxH preservando su proporción original (nunca
- * deforma: la escala es única para ambos ejes, igual que el plano de la sección 3). */
-internal fun PdfCursor.drawFittedBitmap(bitmap: Bitmap, maxW: Float, maxH: Float) {
+/**
+ * Dibuja el bitmap encajado dentro de [maxW]×[maxH] manteniendo su proporción (una sola escala para
+ * ambos ejes: nunca se deforma ni se recorta). Devuelve el alto ocupado.
+ */
+internal fun PdfCursor.drawFittedBitmap(bitmap: Bitmap, maxW: Float, maxH: Float, centered: Boolean = false): Float {
     val scale = min(maxW / bitmap.width, maxH / bitmap.height)
     val w = bitmap.width * scale
     val h = bitmap.height * scale
     ensureSpace(h)
-    val dst = RectF(MARGIN, y, MARGIN + w, y + h)
-    canvas.drawBitmap(bitmap, null, dst, null)
+    val left = if (centered) MARGIN + (CONTENT_WIDTH - w) / 2f else MARGIN
+    val dst = RectF(left, y, left + w, y + h)
+    val paint = Paint(Paint.FILTER_BITMAP_FLAG or Paint.ANTI_ALIAS_FLAG)
+    canvas.drawBitmap(bitmap, null, dst, paint)
+    canvas.drawRect(dst, Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.rgb(0xcc, 0xcc, 0xcc); style = Paint.Style.STROKE; strokeWidth = 0.5f })
     y += h + 2f
+    return h
+}
+
+internal fun PdfCursor.drawBanner(text: String, fonts: PdfFonts, bg: Int = Color.rgb(0xff, 0xf4, 0xd6), border: Int = Color.rgb(0x8a, 0x53, 0x00)) {
+    val sanitized = sanitizeForPdf(text)
+    val layout = buildStaticLayout(sanitized, fonts.warning, (CONTENT_WIDTH - 16f).toInt())
+    val boxHeight = layout.height + 12f
+    ensureSpace(boxHeight + 8f)
+    val top = y
+    canvas.drawRect(MARGIN, top, MARGIN + CONTENT_WIDTH, top + boxHeight, Paint(Paint.ANTI_ALIAS_FLAG).apply { color = bg; style = Paint.Style.FILL })
+    canvas.drawRect(MARGIN, top, MARGIN + CONTENT_WIDTH, top + boxHeight, Paint(Paint.ANTI_ALIAS_FLAG).apply { color = border; style = Paint.Style.STROKE; strokeWidth = 1f })
+    canvas.save(); canvas.translate(MARGIN + 8f, top + 6f); layout.draw(canvas); canvas.restore()
+    y = top + boxHeight + 8f
 }

@@ -15,8 +15,14 @@ interface AlignmentDao {
     @Query("SELECT * FROM alignments WHERE project_id = :projectId ORDER BY created_at DESC")
     suspend fun listSnapshot(projectId: Long): List<AlignmentEntity>
 
+    @Query("SELECT * FROM alignments WHERE id = :id")
+    suspend fun getById(id: Long): AlignmentEntity?
+
     @Insert
     suspend fun insert(alignment: AlignmentEntity): Long
+
+    @androidx.room.Update
+    suspend fun update(alignment: AlignmentEntity)
 
     @Delete
     suspend fun delete(alignment: AlignmentEntity)

@@ -4,7 +4,9 @@ import androidx.room.ColumnInfo
 import androidx.room.Entity
 import androidx.room.Index
 import androidx.room.PrimaryKey
+import kotlinx.serialization.Serializable
 
+@Serializable
 /** Registra el valor anterior de un campo antes de sobrescribirlo -- nunca se pierde el dato original. */
 @Entity(
     tableName = "observation_edit_log",

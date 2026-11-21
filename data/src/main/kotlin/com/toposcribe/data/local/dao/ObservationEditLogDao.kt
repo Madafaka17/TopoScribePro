@@ -10,6 +10,9 @@ interface ObservationEditLogDao {
     @Query("SELECT * FROM observation_edit_log WHERE table_name = :tableName AND row_id = :rowId ORDER BY edited_at ASC")
     suspend fun listFor(tableName: String, rowId: Long): List<ObservationEditLogEntity>
 
+    @Query("SELECT * FROM observation_edit_log WHERE table_name = :tableName ORDER BY edited_at ASC, id ASC")
+    suspend fun listForTable(tableName: String): List<ObservationEditLogEntity>
+
     @Insert
     suspend fun insert(entry: ObservationEditLogEntity): Long
 }

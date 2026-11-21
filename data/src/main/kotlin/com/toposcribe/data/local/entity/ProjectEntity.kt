@@ -4,12 +4,14 @@ import androidx.room.ColumnInfo
 import androidx.room.Embedded
 import androidx.room.Entity
 import androidx.room.PrimaryKey
+import kotlinx.serialization.Serializable
 
 /**
  * Paneles condicionales de Instrumento (Estación Total / GNSS-RTK / Nivel Óptico) del diseño --
  * no existen como tales en la app web, se agregan aquí via @Embedded (mismo criterio de "columnas
  * planas en projects" que ya usa el server, sin crear una tabla nueva para esto).
  */
+@Serializable
 data class InstrumentProfile(
     // Estación Total
     @ColumnInfo(name = "angular_precision_arcsec") val angularPrecisionArcSec: Double? = null,
@@ -24,6 +26,7 @@ data class InstrumentProfile(
     @ColumnInfo(name = "standard_precision_mm_per_km") val standardPrecisionMmPerKm: Double? = null,
 )
 
+@Serializable
 @Entity(tableName = "projects")
 data class ProjectEntity(
     @PrimaryKey(autoGenerate = true) val id: Long = 0,
@@ -35,7 +38,7 @@ data class ProjectEntity(
     val responsible: String? = null,
     @ColumnInfo(name = "field_procedure") val fieldProcedure: String? = null,
     val instrument: String? = null,
-    @ColumnInfo(name = "instrument_type") val instrumentType: InstrumentType = InstrumentType.ESTACION_TOTAL,
+    @ColumnInfo(name = "instrument_type") val instrumentType: InstrumentType = InstrumentType.TEODOLITO,
     // Constante prismática guardada en METROS internamente (coherente con el motor de cálculo ya
     // probado); la UI de Instrumento la muestra/convierte en mm como pide el diseño.
     @ColumnInfo(name = "prism_constant_m") val prismConstantM: Double = 0.0,
@@ -50,6 +53,11 @@ data class ProjectEntity(
     @ColumnInfo(name = "display_precision") val displayPrecision: Int = 3,
     val observations: String? = null,
     @ColumnInfo(name = "is_demo") val isDemo: Boolean = false,
+    /** Equidistancia elegida para las curvas de nivel (null = aún no definida). */
+    @ColumnInfo(name = "contour_equidistance") val contourEquidistance: Double? = null,
+    /** Marca/modelo/serie del nivel de ingeniero y del teodolito usados en este levantamiento. */
+    @ColumnInfo(name = "level_instrument") val levelInstrument: String? = null,
+    @ColumnInfo(name = "theodolite_instrument") val theodoliteInstrument: String? = null,
     @ColumnInfo(name = "created_at") val createdAt: String,
     @ColumnInfo(name = "updated_at") val updatedAt: String? = null,
 )

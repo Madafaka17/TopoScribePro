@@ -32,6 +32,9 @@ interface PointDao {
     @Update
     suspend fun update(point: PointEntity)
 
+    @Query("DELETE FROM points WHERE id = :id")
+    suspend fun hardDelete(id: Long)
+
     @Query("UPDATE points SET deleted_at = :deletedAt WHERE id = :id")
     suspend fun softDelete(id: Long, deletedAt: String)
 
@@ -39,8 +42,23 @@ interface PointDao {
         """SELECT
             (SELECT COUNT(*) FROM planimetry_observations WHERE (occupied_point_id = :id OR target_point_id = :id) AND deleted_at IS NULL) +
             (SELECT COUNT(*) FROM leveling_observations WHERE point_id = :id AND deleted_at IS NULL) +
-            (SELECT COUNT(*) FROM leveling_trig_observations WHERE (occupied_point_id = :id OR target_point_id = :id) AND deleted_at IS NULL)
+            (SELECT COUNT(*) FROM leveling_trig_observations WHERE (occupied_point_id = :id OR target_point_id = :id) AND deleted_at IS NULL) +
+            (SELECT COUNT(*) FROM station_setups WHERE occupied_point_id = :id OR backsight_point_id = :id) +
+            (SELECT COUNT(*) FROM leveling_runs WHERE start_bm_point_id = :id OR end_bm_point_id = :id)
         """,
     )
     suspend fun countReferences(id: Long): Int
+
+    /** Limpieza previa al borrado físico: filas ya eliminadas lógicamente y resultados calculados del punto. */
+    @Query("DELETE FROM planimetry_observations WHERE deleted_at IS NOT NULL AND (occupied_point_id = :id OR target_point_id = :id)")
+    suspend fun purgeDeletedPlanimetry(id: Long)
+
+    @Query("DELETE FROM leveling_observations WHERE deleted_at IS NOT NULL AND point_id = :id")
+    suspend fun purgeDeletedLeveling(id: Long)
+
+    @Query("DELETE FROM leveling_trig_observations WHERE deleted_at IS NOT NULL AND (occupied_point_id = :id OR target_point_id = :id)")
+    suspend fun purgeDeletedTrig(id: Long)
+
+    @Query("DELETE FROM computed_points WHERE point_id = :id")
+    suspend fun purgeComputed(id: Long)
 }

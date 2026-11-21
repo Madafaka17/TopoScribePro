@@ -18,6 +18,10 @@ interface LevelingObservationDao {
     @Query("SELECT * FROM leveling_observations WHERE id = :id")
     suspend fun getById(id: Long): LevelingObservationEntity?
 
+    /** Todos los ids de la nivelación, incluidas las lecturas eliminadas lógicamente (para retirar sus resultados). */
+    @Query("SELECT id FROM leveling_observations WHERE leveling_run_id = :runId")
+    suspend fun allIdsByRun(runId: Long): List<Long>
+
     @Insert
     suspend fun insert(observation: LevelingObservationEntity): Long
 

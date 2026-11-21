@@ -1,4 +1,4 @@
-*.iml
+﻿*.iml
 .gradle/
 /local.properties
 .idea/
@@ -13,7 +13,6 @@ local.properties
 *.ap_
 *.dex
 *.class
-schemas/
 
 # Generados por Kotlin/VS Code/Gradle
 .kotlin/

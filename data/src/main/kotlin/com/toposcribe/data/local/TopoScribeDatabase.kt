@@ -6,6 +6,8 @@ import androidx.room.TypeConverters
 import com.toposcribe.data.local.converter.EnumConverters
 import com.toposcribe.data.local.converter.JsonConverters
 import com.toposcribe.data.local.dao.AdjustmentDao
+import com.toposcribe.data.local.dao.AnnexDao
+import com.toposcribe.data.local.dao.CalcSnapshotDao
 import com.toposcribe.data.local.dao.AlignmentDao
 import com.toposcribe.data.local.dao.ComputedPointDao
 import com.toposcribe.data.local.dao.ImportBatchDao
@@ -19,6 +21,8 @@ import com.toposcribe.data.local.dao.ProjectDao
 import com.toposcribe.data.local.dao.StationSetupDao
 import com.toposcribe.data.local.dao.TraverseDao
 import com.toposcribe.data.local.entity.AdjustmentEntity
+import com.toposcribe.data.local.entity.AnnexEntity
+import com.toposcribe.data.local.entity.CalcSnapshotEntity
 import com.toposcribe.data.local.entity.AlignmentEntity
 import com.toposcribe.data.local.entity.ComputedPointEntity
 import com.toposcribe.data.local.entity.ImportBatchEntity
@@ -47,8 +51,10 @@ import com.toposcribe.data.local.entity.TraverseEntity
         ObservationEditLogEntity::class,
         AlignmentEntity::class,
         ImportBatchEntity::class,
+        AnnexEntity::class,
+        CalcSnapshotEntity::class,
     ],
-    version = 1,
+    version = 2,
     exportSchema = true,
 )
 @TypeConverters(EnumConverters::class, JsonConverters::class)
@@ -66,8 +72,11 @@ abstract class TopoScribeDatabase : RoomDatabase() {
     abstract fun observationEditLogDao(): ObservationEditLogDao
     abstract fun alignmentDao(): AlignmentDao
     abstract fun importBatchDao(): ImportBatchDao
+    abstract fun annexDao(): AnnexDao
+    abstract fun calcSnapshotDao(): CalcSnapshotDao
 
     companion object {
         const val DATABASE_NAME = "toposcribe.db"
+        const val VERSION = 2
     }
 }

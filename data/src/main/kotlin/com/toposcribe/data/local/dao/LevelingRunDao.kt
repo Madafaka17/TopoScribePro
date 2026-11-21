@@ -19,4 +19,10 @@ interface LevelingRunDao {
 
     @Insert
     suspend fun insert(run: LevelingRunEntity): Long
+
+    @androidx.room.Update
+    suspend fun update(run: LevelingRunEntity)
+
+    @androidx.room.Delete
+    suspend fun delete(run: LevelingRunEntity)
 }

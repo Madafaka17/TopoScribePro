@@ -28,6 +28,12 @@ interface ComputedPointDao {
     @Query("UPDATE computed_points SET is_current = 0 WHERE project_id = :projectId AND method = :method AND is_current = 1")
     suspend fun retireAllForMethod(projectId: Long, method: String)
 
+    @Query("DELETE FROM computed_points WHERE project_id = :projectId AND method = :method")
+    suspend fun deleteAllForMethod(projectId: Long, method: String)
+
+    @Query("UPDATE computed_points SET is_current = 0 WHERE id = :id")
+    suspend fun retireById(id: Long)
+
     @Insert
     suspend fun insert(row: ComputedPointEntity): Long
 }

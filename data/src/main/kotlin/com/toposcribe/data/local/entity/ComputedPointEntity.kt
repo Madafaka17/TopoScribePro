@@ -16,6 +16,7 @@ data class SourceObservationRef(val table: String, val id: Long)
  * fila existente. Bruto y compensado son filas distintas (method="poligonal_bruto" vs
  * "poligonal_bowditch"), así la UI muestra antes/después sin perder el dato bruto.
  */
+@Serializable
 @Entity(
     tableName = "computed_points",
     foreignKeys = [

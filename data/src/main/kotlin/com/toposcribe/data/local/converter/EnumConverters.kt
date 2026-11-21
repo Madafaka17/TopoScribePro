@@ -1,8 +1,10 @@
 package com.toposcribe.data.local.converter
 
 import androidx.room.TypeConverter
+import com.toposcribe.calc.AngleConvention
 import com.toposcribe.calc.ReadingType
 import com.toposcribe.calc.TraverseType
+import com.toposcribe.data.local.entity.AnnexKind
 import com.toposcribe.data.local.entity.CoordinateMode
 import com.toposcribe.data.local.entity.DataSource
 import com.toposcribe.data.local.entity.DifferentialCorrectionType
@@ -70,4 +72,14 @@ class EnumConverters {
     fun readingTypeToString(value: ReadingType): String = value.name
     @TypeConverter
     fun stringToReadingType(value: String): ReadingType = ReadingType.valueOf(value)
+
+    @TypeConverter
+    fun annexKindToString(value: AnnexKind): String = value.name
+    @TypeConverter
+    fun stringToAnnexKind(value: String): AnnexKind = runCatching { AnnexKind.valueOf(value) }.getOrDefault(AnnexKind.OTRO)
+
+    @TypeConverter
+    fun angleConventionToString(value: AngleConvention): String = value.name
+    @TypeConverter
+    fun stringToAngleConvention(value: String): AngleConvention = runCatching { AngleConvention.valueOf(value) }.getOrDefault(AngleConvention.HORARIO)
 }

@@ -1,363 +1,186 @@
 package com.toposcribe.app.ui.screens.planimetria
 
-import com.toposcribe.app.ui.components.isInvalidNumber
-import com.toposcribe.app.ui.components.toDecimalOrNull
-import androidx.compose.foundation.clickable
-import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.Checkbox
-import androidx.compose.material3.DropdownMenu
-import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
-import com.toposcribe.app.data.repository.TraverseAngularClosure
-import com.toposcribe.app.data.repository.TraverseComputeResult
-import com.toposcribe.app.data.repository.TraverseLinearClosure
+import com.toposcribe.app.data.repository.PointResult
+import com.toposcribe.app.data.repository.RadiationRow
+import com.toposcribe.app.ui.components.ConfirmDialog
+import com.toposcribe.app.ui.components.Dropdown
+import com.toposcribe.app.ui.components.FormDialog
+import com.toposcribe.app.ui.components.LocalNotify
+import com.toposcribe.app.ui.components.NoProjectMessage
+import com.toposcribe.app.ui.components.SectionCard
+import com.toposcribe.app.ui.components.StateBanner
+import com.toposcribe.app.ui.components.TextFieldRow
 import com.toposcribe.app.ui.theme.MonoFieldStyle
-import com.toposcribe.calc.TraverseType
-import com.toposcribe.calc.decimalToDms
-import com.toposcribe.calc.formatDms
-import com.toposcribe.data.local.entity.PointEntity
-import com.toposcribe.data.local.entity.TraverseEntity
-import kotlin.math.atan2
-import kotlin.math.hypot
+import com.toposcribe.calc.formatDegreesAsDms
+import com.toposcribe.calc.planAzimuth
+import com.toposcribe.calc.planDistance
+import com.toposcribe.data.local.entity.AlignmentEntity
+import java.util.Locale
+
+private fun f3(v: Double?) = if (v == null) "—" else String.format(Locale.US, "%.3f", v)
+private val small = MonoFieldStyle.copy(fontSize = androidx.compose.ui.unit.TextUnit(11f, androidx.compose.ui.unit.TextUnitType.Sp))
 
 @Composable
-fun PlanimetriaScreen(modifier: Modifier = Modifier, viewModel: PlanimetriaViewModel = hiltViewModel()) {
-    val state by viewModel.uiState.collectAsState()
-    val radiacionResult by viewModel.radiacionResult.collectAsState()
-    val traverseResult by viewModel.traverseResult.collectAsState()
-    val error by viewModel.error.collectAsState()
-    val info by viewModel.info.collectAsState()
+fun PlanimetriaScreen(modifier: Modifier = Modifier, vm: PlanimetriaViewModel = hiltViewModel()) {
+    val ui by vm.ui.collectAsState()
+    val notify = LocalNotify.current
+    if (ui.projectId == null) { NoProjectMessage(modifier); return }
+    var ficha by remember { mutableStateOf<RadiationRow?>(null) }
+    var lineDialog by remember { mutableStateOf<AlignmentEntity?>(null) }
+    var newLine by remember { mutableStateOf(false) }
+    var deleteLine by remember { mutableStateOf<AlignmentEntity?>(null) }
+    var lineError by remember { mutableStateOf<String?>(null) }
+    val withCoords = ui.results.filter { it.hasCoordinates }
+    val eval = ui.evaluation
+    val rows = eval?.rows.orEmpty()
 
-    var applyBowditch by remember { mutableStateOf(true) }
+    ficha?.let { FichaDialog(it) { ficha = null } }
+    if (newLine || lineDialog != null) {
+        LineDialog(lineDialog, withCoords, lineError, onDismiss = { newLine = false; lineDialog = null; lineError = null }) { name, ids, closed ->
+            vm.saveLine(lineDialog?.id, name, ids, closed) { err -> if (err == null) { newLine = false; lineDialog = null; lineError = null; notify("Línea guardada.") } else lineError = err }
+        }
+    }
+    deleteLine?.let { l -> ConfirmDialog("Eliminar línea", "¿Eliminar la línea «${l.name}»? Los puntos no se borran.", onConfirm = { vm.deleteLine(l); deleteLine = null }, onDismiss = { deleteLine = null }) }
 
-    LazyColumn(modifier = modifier.fillMaxWidth().padding(12.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+    LazyColumn(modifier.fillMaxWidth().padding(horizontal = 12.dp), verticalArrangement = Arrangement.spacedBy(10.dp), contentPadding = androidx.compose.foundation.layout.PaddingValues(vertical = 10.dp)) {
         item {
+            SectionCard("Planimetría por radiación (teodolito)") {
+                Text("Solo se usa el método de radiación: cada punto se calcula desde una estación ocupada con coordenadas conocidas o locales declaradas, una referencia de orientación y un convenio angular.", style = MaterialTheme.typography.bodySmall)
+                if (eval != null) StateBanner(eval.state, "Planimetría")
+                Button(onClick = { vm.compute(notify) }, enabled = rows.any { it.legacyNote == null }, modifier = Modifier.fillMaxWidth().testTag("btn_calcular_radiacion")) { Text("Calcular y guardar radiación") }
+            }
+        }
+        if (rows.isEmpty()) item { Text("No hay lecturas de radiación. Regístrelas en «Libreta de campo» (modo Teodolito).", style = MaterialTheme.typography.bodySmall) }
+        items(rows, key = { it.observation.id }) { r ->
+            val s = r.step
             Card(Modifier.fillMaxWidth()) {
-                Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text("Cálculo Planimétrico Riguroso Paso a Paso", style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.primary)
-                    Text(
-                        "Demostración numérica de proyecciones ortogonales y compensación de Bowditch. Calcula coordenadas por radiación (azimut/rumbo + distancia) propagando desde los puntos de control y ya calculados.",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                    Button(onClick = viewModel::computeRadiacion) { Text("Calcular Planimetría (radiación)") }
-                    radiacionResult?.let { result ->
-                        Text("Puntos calculados en esta corrida: ${result.computedCount}", style = MaterialTheme.typography.bodyMedium)
-                        result.warnings.forEach { w ->
-                            Text("⚠ ${w.message}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
-                        }
+                Column(Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                    Text("${r.stationCode} → ${r.targetCode}", style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.primary)
+                    Text("Lectura original: ${r.originalReading}", style = small)
+                    Text("Orientación: " + (r.setup?.let { "ref. «${it.backsightPointLabel}» Az ${formatDegreesAsDms(it.baseAzimuthDecimal, 2)}, Hz ${formatDegreesAsDms(it.backsightReadingDeg, 2)}, ${it.angleConvention.name.lowercase()}" } ?: "azimut directo"), style = small)
+                    if (s != null) {
+                        Text("Azimut ${formatDegreesAsDms(s.azimuthDeg, 2)}   d = ${f3(s.horizontalDistance)}", style = small)
+                        Text("ΔE ${f3(s.deltaE)}   ΔN ${f3(s.deltaN)}", style = small)
+                        Text("Este ${f3(s.east)}   Norte ${f3(s.north)}", style = small, color = MaterialTheme.colorScheme.secondary)
+                        TextButton(onClick = { ficha = r }) { Text("Ficha: fórmulas con valores") }
+                    } else {
+                        r.legacyNote?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.tertiary) }
+                        r.errors.forEach { Text("No calculado: $it", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error) }
                     }
                 }
             }
         }
-
-        val result = traverseResult
-        val codeById = state.points.associate { it.id to it.code }
-        val rows = if (result != null) buildLegRows(result, codeById, applyBowditch) else emptyList()
-
-        item { FormulasCard(result, rows.firstOrNull()) }
-
-        item { NewTraverseCard(points = state.points, onCreate = viewModel::createTraverse) }
 
         item {
+            SectionCard("Unir puntos (líneas en el orden elegido)") {
+                Text("Solo se pueden unir puntos con coordenadas calculadas. Las líneas aparecen en el Plano CAD y en el DXF.", style = MaterialTheme.typography.bodySmall)
+                OutlinedButton(onClick = { newLine = true; lineError = null }, enabled = withCoords.size >= 2, modifier = Modifier.testTag("btn_nueva_linea")) { Text("Nueva línea") }
+            }
+        }
+        items(ui.lines, key = { "l${it.id}" }) { l ->
+            val byId = withCoords.associateBy { it.point.id }
+            val vertices = l.pointSequence.mapNotNull { byId[it] }
             Card(Modifier.fillMaxWidth()) {
-                Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text("Poligonales", style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.primary)
-                    if (state.traverses.isEmpty()) {
-                        Text("Todavía no hay poligonales creadas.", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Column(Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                    Text("${l.name}${if (l.closed) " (cerrada)" else ""}: " + l.pointSequence.joinToString(" → ") { id -> ui.results.firstOrNull { it.point.id == id }?.point?.code ?: "?" }, style = MaterialTheme.typography.titleSmall)
+                    var total = 0.0
+                    val pairs = vertices.zipWithNext() + if (l.closed && vertices.size > 2) listOf(vertices.last() to vertices.first()) else emptyList()
+                    pairs.forEach { (a, b) ->
+                        val d = planDistance(a.east!!, a.north!!, b.east!!, b.north!!); total += d
+                        Text("${a.point.code} → ${b.point.code}: ${f3(d)} ${ui.units}   Az ${formatDegreesAsDms(planAzimuth(a.east, a.north, b.east, b.north), 2)}", style = small)
                     }
-                    state.traverses.forEach { t ->
-                        Row(Modifier.fillMaxWidth().padding(vertical = 2.dp), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-                            Text("${t.name} (${traverseTypeLabel(t.type)})")
-                            Button(onClick = { viewModel.computeTraverse(t.id) }) { Text("Calcular") }
-                        }
-                    }
-                    if (info != null) Text(info ?: "", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.secondary)
-                    if (error != null) Text(error ?: "", color = MaterialTheme.colorScheme.error)
+                    Text("Longitud total: ${f3(total)} ${ui.units}", style = small, color = MaterialTheme.colorScheme.secondary)
+                    Row { TextButton(onClick = { lineDialog = l; lineError = null }) { Text("Editar") }; TextButton(onClick = { deleteLine = l }) { Text("Eliminar", color = MaterialTheme.colorScheme.error) } }
                 }
             }
         }
-
-        item { ClosureMetricsCard(result?.angularClosure, result?.linearClosure, calculated = result != null) }
-
-        if (result != null) {
-            item { BowditchTable(rows, applyBowditch, bowditchAvailable = result.stations.any { it.adjustedEast != null }) { applyBowditch = it } }
-        }
+        item { DistanceTool(withCoords, ui.units) }
     }
 }
 
 @Composable
-private fun FormulasCard(result: TraverseComputeResult?, first: LegRow?) {
-    val proj = if (first != null) {
-        "ΔE = %.3f · sin(%s) = %+.3f m   |   ΔN = %.3f · cos(%s) = %+.3f m".format(
-            first.distance, formatDms(decimalToDms(first.azimuth)), first.dE, first.distance, formatDms(decimalToDms(first.azimuth)), first.dN,
-        )
-    } else {
-        "Ej: ΔE = 10.000 · sin(90°) = +10.000 m"
-    }
-    val coord = if (first != null && result != null) {
-        "E = %.3f + %+.3f = %.3f m   |   N = %.3f + %+.3f = %.3f m".format(
-            result.startEast, first.dE, result.startEast + first.dE, result.startNorth, first.dN, result.startNorth + first.dN,
-        )
-    } else {
-        "E = 500.000 + 10.000 = 510.000 m"
-    }
-    Card(Modifier.fillMaxWidth()) {
-        Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Text("Fórmulas topográficas aplicadas con valores sustituidos", style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.primary)
-            FormulaBlock("1. Reducción de distancia", "d = D_inc · sin(Z)", "Ej: 100.000 · sin(90°) = 100.000 m")
-            FormulaBlock("2. Proyecciones ortogonales", "ΔE = d · sin(Az)  |  ΔN = d · cos(Az)", proj + if (first != null) "  (primer tramo: ${first.code})" else "")
-            FormulaBlock("3. Coordenadas finales", "E = E_orig + ΔE  |  N = N_orig + ΔN", coord)
-        }
+private fun DistanceTool(points: List<PointResult>, units: String) {
+    var a by remember { mutableStateOf<PointResult?>(null) }
+    var b by remember { mutableStateOf<PointResult?>(null) }
+    SectionCard("Distancia entre puntos calculados") {
+        Dropdown("Punto A", points, a, { it.point.code }, { a = it })
+        Dropdown("Punto B", points, b, { it.point.code }, { b = it })
+        val pa = a; val pb = b
+        if (pa != null && pb != null) {
+            Text("Distancia horizontal A–B: ${f3(planDistance(pa.east!!, pa.north!!, pb.east!!, pb.north!!))} $units", style = MaterialTheme.typography.bodyMedium)
+            Text("Azimut A→B: ${formatDegreesAsDms(planAzimuth(pa.east, pa.north, pb.east!!, pb.north!!), 2)}", style = MaterialTheme.typography.bodySmall)
+        } else Text("Elija dos puntos con coordenadas.", style = MaterialTheme.typography.bodySmall)
     }
 }
 
 @Composable
-private fun FormulaBlock(title: String, formula: String, substituted: String) {
-    Column {
-        Text(title, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.secondary)
-        Text(formula, style = MonoFieldStyle)
-        Text(substituted, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-    }
-}
-
-@Composable
-private fun NewTraverseCard(points: List<PointEntity>, onCreate: (String, TraverseType, Long?, Long?, Double?) -> Unit) {
-    var name by remember { mutableStateOf("") }
-    var type by remember { mutableStateOf(TraverseType.CERRADA_POLIGONO) }
-    var startPoint by remember { mutableStateOf<PointEntity?>(null) }
-    var endPoint by remember { mutableStateOf<PointEntity?>(null) }
-    var startAzimuth by remember { mutableStateOf("") }
-
-    Card(Modifier.fillMaxWidth()) {
-        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Text("Nueva poligonal", style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.primary)
-            OutlinedTextField(value = name, onValueChange = { name = it }, label = { Text("Nombre") }, modifier = Modifier.fillMaxWidth())
-            TraverseTypeDropdown(selected = type, onSelect = { type = it })
-            PointDropdown("Punto de partida", points, startPoint) { startPoint = it }
-            if (type == TraverseType.ABIERTA_AMARRADA) {
-                PointDropdown("Punto de cierre (amarre)", points, endPoint) { endPoint = it }
+private fun FichaDialog(row: RadiationRow, onDismiss: () -> Unit) {
+    val s = row.step ?: return
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Ficha del punto ${row.targetCode}") },
+        text = {
+            Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                Text("Estación ocupada: ${row.stationCode}", style = MaterialTheme.typography.bodyMedium)
+                Text("Lectura original: ${row.originalReading}", style = small)
+                Text("Orientación: " + (row.setup?.let { "ref. «${it.backsightPointLabel}», azimut ${formatDegreesAsDms(it.baseAzimuthDecimal, 2)}, lectura ${formatDegreesAsDms(it.backsightReadingDeg, 2)}, convenio ${it.angleConvention.name.lowercase()}" } ?: "azimut ingresado directamente"), style = small)
+                Text("Azimut usado: ${formatDegreesAsDms(s.azimuthDeg, 2)}   ·   Distancia horizontal usada: ${f3(s.horizontalDistance)}", style = small)
+                Text("Proyecciones: ΔE = ${f3(s.deltaE)}   ΔN = ${f3(s.deltaN)}", style = small)
+                Text("Coordenadas: E = ${f3(s.east)}   N = ${f3(s.north)}", style = small)
+                Text("Fórmulas con valores sustituidos", style = MaterialTheme.typography.labelLarge)
+                listOf(s.azimuthFormula, s.distanceFormula, s.deltaEFormula, s.deltaNFormula, s.eastFormula, s.northFormula).forEach { Text(it, style = small) }
             }
-            OutlinedTextField(
-                value = startAzimuth, onValueChange = { startAzimuth = it }, label = { Text("Azimut de arranque (°)") }, textStyle = MonoFieldStyle,
-                singleLine = true, isError = startAzimuth.isInvalidNumber(), modifier = Modifier.fillMaxWidth(),
-            )
-            var formError by remember { mutableStateOf<String?>(null) }
-            if (formError != null) Text(formError ?: "", color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
-            Button(onClick = {
-                val azimuth = startAzimuth.toDecimalOrNull()
-                formError = when {
-                    startPoint == null -> "Elige el punto de partida."
-                    type == TraverseType.ABIERTA_AMARRADA && endPoint == null -> "Elige el punto de cierre (amarre)."
-                    azimuth == null -> "Indica el azimut de arranque (número, con coma o punto)."
-                    azimuth < 0.0 || azimuth >= 360.0 -> "El azimut debe estar entre 0° y 360°."
-                    else -> null
-                }
-                if (formError == null) {
-                    onCreate(name, type, startPoint?.id, endPoint?.id, azimuth)
-                    name = ""; startAzimuth = ""
-                }
-            }) { Text("Crear poligonal") }
-        }
-    }
-}
-
-/** Las 5 métricas de cierre del diseño (P, ex, ey, eL, precisión relativa); "--" mientras no se calcule. */
-@Composable
-private fun ClosureMetricsCard(angular: TraverseAngularClosure?, linear: TraverseLinearClosure?, calculated: Boolean) {
-    Card(Modifier.fillMaxWidth()) {
-        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Text("Métricas de cierre", style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.primary)
-            Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(16.dp)) {
-                Metric("Perímetro Total (P)", linear?.let { "${fmt(it.perimeter)} m" } ?: "-- m")
-                Metric("Error en X (ex)", linear?.let { "${fmt(it.fE)} m" } ?: "-- m")
-                Metric("Error en Y (ey)", linear?.let { "${fmt(it.fN)} m" } ?: "-- m")
-                Metric("Error Lineal (eL)", linear?.let { "${fmt(it.fL)} m" } ?: "-- m")
-                Metric("Precisión Relativa", linear?.relativePrecisionLabel ?: "--", MaterialTheme.colorScheme.secondary)
-            }
-            if (angular != null) {
-                Text("Cierre angular: ${fmt(angular.misclosureDeg, 5)}°  (corrección/ángulo: ${fmt(angular.correctionPerAngleDeg, 5)}°)", style = MonoFieldStyle)
-            }
-            if (calculated && linear == null) {
-                Text("No se pudo calcular el cierre lineal: falta un punto de cierre conocido.", color = MaterialTheme.colorScheme.error)
-            }
-        }
-    }
-}
-
-@Composable
-private fun Metric(label: String, value: String, valueColor: androidx.compose.ui.graphics.Color = androidx.compose.ui.graphics.Color.Unspecified) {
-    Column {
-        Text(label.uppercase(), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-        Text(value, style = MonoFieldStyle, color = valueColor)
-    }
-}
-
-/** Fila de la tabla comparativa, derivada de las coordenadas de estación (no se recalcula nada nuevo). */
-private data class LegRow(
-    val code: String,
-    val distance: Double,
-    val azimuth: Double,
-    val dE: Double,
-    val corrE: Double?,
-    val dEc: Double?,
-    val dN: Double,
-    val corrN: Double?,
-    val dNc: Double?,
-    val east: Double,
-    val north: Double,
-)
-
-private fun buildLegRows(result: TraverseComputeResult, codeById: Map<Long, String>, applyBowditch: Boolean): List<LegRow> {
-    var prevRawE = result.startEast
-    var prevRawN = result.startNorth
-    var prevAdjE = result.startEast
-    var prevAdjN = result.startNorth
-    return result.stations.map { s ->
-        val dE = s.rawEast - prevRawE
-        val dN = s.rawNorth - prevRawN
-        var azimuth = Math.toDegrees(atan2(dE, dN))
-        if (azimuth < 0) azimuth += 360.0
-
-        val adjE = s.adjustedEast
-        val adjN = s.adjustedNorth
-        val useAdjusted = applyBowditch && adjE != null && adjN != null
-        val dEc = if (useAdjusted) adjE!! - prevAdjE else null
-        val dNc = if (useAdjusted) adjN!! - prevAdjN else null
-
-        val row = LegRow(
-            code = codeById[s.pointId] ?: "?",
-            distance = hypot(dE, dN),
-            azimuth = azimuth,
-            dE = dE,
-            corrE = dEc?.let { it - dE },
-            dEc = dEc,
-            dN = dN,
-            corrN = dNc?.let { it - dN },
-            dNc = dNc,
-            east = if (useAdjusted) adjE!! else s.rawEast,
-            north = if (useAdjusted) adjN!! else s.rawNorth,
-        )
-        prevRawE = s.rawEast
-        prevRawN = s.rawNorth
-        prevAdjE = adjE ?: s.rawEast
-        prevAdjN = adjN ?: s.rawNorth
-        row
-    }
-}
-
-@Composable
-private fun BowditchTable(rows: List<LegRow>, applyBowditch: Boolean, bowditchAvailable: Boolean, onToggle: (Boolean) -> Unit) {
-    val columns = listOf(
-        "Tramo" to 70.dp, "d Horiz [m]" to 90.dp, "Azimut" to 110.dp,
-        "ΔE orig" to 90.dp, "Corr E" to 80.dp, "ΔE corr" to 90.dp,
-        "ΔN orig" to 90.dp, "Corr N" to 80.dp, "ΔN corr" to 90.dp,
-        "Este (X)" to 100.dp, "Norte (Y)" to 100.dp, "Punto" to 70.dp,
+        },
+        confirmButton = { TextButton(onClick = onDismiss) { Text("Cerrar") } },
     )
-    val w = columns.map { it.second }
-    Card(Modifier.fillMaxWidth()) {
-        val scroll = rememberScrollState()
-        Column(Modifier.padding(12.dp)) {
-            Text("Tabla Comparativa: Original vs Compensado Bowditch", style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.primary)
+}
+
+@Composable
+private fun LineDialog(existing: AlignmentEntity?, points: List<PointResult>, error: String?, onDismiss: () -> Unit, onConfirm: (String, List<Long>, Boolean) -> Unit) {
+    var name by remember { mutableStateOf(existing?.name.orEmpty()) }
+    var closed by remember { mutableStateOf(existing?.closed ?: false) }
+    val ids = remember { mutableStateListOf<Long>().apply { existing?.pointSequence?.let { addAll(it) } } }
+    var toAdd by remember { mutableStateOf<PointResult?>(null) }
+    FormDialog(if (existing == null) "Nueva línea" else "Editar línea", error = error, onDismiss = onDismiss, onConfirm = { onConfirm(name, ids.toList(), closed) }) {
+        TextFieldRow("Nombre de la línea", name, { name = it })
+        Dropdown("Añadir punto al final", points, toAdd, { it.point.code }, { p -> if (p != null) ids.add(p.point.id); toAdd = null })
+        ids.forEachIndexed { i, id ->
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Checkbox(checked = applyBowditch, onCheckedChange = onToggle)
-                Text("Aplicar Bowditch", style = MaterialTheme.typography.bodySmall)
-            }
-            if (applyBowditch && !bowditchAvailable) {
-                Text(
-                    "Bowditch no es aplicable a esta poligonal (sin cierre conocido): se muestran las coordenadas brutas.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.error,
-                    modifier = Modifier.padding(bottom = 6.dp),
-                )
-            }
-            Row(Modifier.horizontalScroll(scroll)) {
-                columns.forEach { (title, width) -> HeaderCell(title, width) }
-            }
-            rows.forEachIndexed { index, r ->
-                Row(Modifier.horizontalScroll(scroll)) {
-                    Cell("T${index + 1}", w[0], mono = true)
-                    Cell(fmt(r.distance), w[1], mono = true)
-                    Cell(formatDms(decimalToDms(r.azimuth)), w[2], mono = true)
-                    Cell(fmt(r.dE), w[3], mono = true)
-                    Cell(r.corrE?.let { "%+.3f".format(it) } ?: "—", w[4], mono = true)
-                    Cell(r.dEc?.let { fmt(it) } ?: "—", w[5], mono = true)
-                    Cell(fmt(r.dN), w[6], mono = true)
-                    Cell(r.corrN?.let { "%+.3f".format(it) } ?: "—", w[7], mono = true)
-                    Cell(r.dNc?.let { fmt(it) } ?: "—", w[8], mono = true)
-                    Cell(fmt(r.east), w[9], mono = true)
-                    Cell(fmt(r.north), w[10], mono = true)
-                    Cell(r.code, w[11], mono = true)
-                }
+                Text("${i + 1}. ${points.firstOrNull { it.point.id == id }?.point?.code ?: "?"}", Modifier.weight(1f))
+                TextButton(onClick = { if (i > 0) { ids.removeAt(i); ids.add(i - 1, id) } }, enabled = i > 0) { Text("↑") }
+                TextButton(onClick = { if (i < ids.size - 1) { ids.removeAt(i); ids.add(i + 1, id) } }, enabled = i < ids.size - 1) { Text("↓") }
+                TextButton(onClick = { ids.removeAt(i) }) { Text("✕", color = MaterialTheme.colorScheme.error) }
             }
         }
+        Row(verticalAlignment = Alignment.CenterVertically) { Checkbox(checked = closed, onCheckedChange = { closed = it }); Text("Cerrar la línea (unir el último punto con el primero)") }
     }
-}
-
-private fun traverseTypeLabel(type: TraverseType): String = when (type) {
-    TraverseType.CERRADA_POLIGONO -> "Cerrada"
-    TraverseType.ABIERTA_AMARRADA -> "Abierta amarrada"
-    TraverseType.ABIERTA_LIBRE -> "Abierta libre"
-}
-
-@Composable
-private fun TraverseTypeDropdown(selected: TraverseType, onSelect: (TraverseType) -> Unit) {
-    var expanded by remember { mutableStateOf(false) }
-    Box(Modifier.fillMaxWidth()) {
-        OutlinedTextField(value = traverseTypeLabel(selected), onValueChange = {}, readOnly = true, label = { Text("Tipo de poligonal") }, modifier = Modifier.fillMaxWidth())
-        Box(Modifier.matchParentSize().clickable { expanded = true })
-        DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
-            TraverseType.entries.forEach { t ->
-                DropdownMenuItem(text = { Text(traverseTypeLabel(t)) }, onClick = { onSelect(t); expanded = false })
-            }
-        }
-    }
-}
-
-@Composable
-private fun PointDropdown(label: String, points: List<PointEntity>, selected: PointEntity?, onSelect: (PointEntity) -> Unit) {
-    var expanded by remember { mutableStateOf(false) }
-    Box(Modifier.fillMaxWidth()) {
-        OutlinedTextField(value = selected?.code ?: "Seleccione...", onValueChange = {}, readOnly = true, label = { Text(label) }, modifier = Modifier.fillMaxWidth())
-        Box(Modifier.matchParentSize().clickable { expanded = true })
-        DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
-            points.forEach { p -> DropdownMenuItem(text = { Text(p.code) }, onClick = { onSelect(p); expanded = false }) }
-        }
-    }
-}
-
-private fun fmt(value: Double, digits: Int = 3): String = "%.${digits}f".format(value)
-
-@Composable
-private fun HeaderCell(text: String, width: Dp) {
-    Text(text, modifier = Modifier.width(width).padding(4.dp), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-}
-
-@Composable
-private fun Cell(text: String, width: Dp, mono: Boolean = false) {
-    Text(text, modifier = Modifier.width(width).padding(4.dp), style = if (mono) MonoFieldStyle else MaterialTheme.typography.bodySmall)
 }

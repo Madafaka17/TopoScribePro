@@ -5,6 +5,8 @@ import androidx.room.Entity
 import androidx.room.ForeignKey
 import androidx.room.Index
 import androidx.room.PrimaryKey
+import com.toposcribe.calc.AngleConvention
+import kotlinx.serialization.Serializable
 
 /**
  * Header de "Estación Ocupada & Referencia de Orientación (Vista Atrás)" de la Libreta -- la
@@ -13,6 +15,7 @@ import androidx.room.PrimaryKey
  * sigue guardando su propio occupiedPointId/instrumentHeight (denormalizado, igual que el
  * server), así que un setup posterior nunca reescribe el historial de observaciones ya creadas.
  */
+@Serializable
 @Entity(
     tableName = "station_setups",
     foreignKeys = [
@@ -32,5 +35,11 @@ data class StationSetupEntity(
     @ColumnInfo(name = "base_azimuth_sec") val baseAzimuthSec: Double,
     // Cacheado via Angles.dmsToDecimal, nunca fuente de verdad -- deg/min/sec son los campos reales.
     @ColumnInfo(name = "base_azimuth_decimal") val baseAzimuthDecimal: Double,
+    /** Lectura del círculo horizontal al visar la referencia (por defecto 0°00'00"). */
+    @ColumnInfo(name = "backsight_reading_deg", defaultValue = "0") val backsightReadingDeg: Double = 0.0,
+    /** Sentido en que crece la lectura del círculo horizontal (HORARIO / ANTIHORARIO). */
+    @ColumnInfo(name = "angle_convention", defaultValue = "'HORARIO'") val angleConvention: AngleConvention = AngleConvention.HORARIO,
+    /** Punto del proyecto usado como referencia de orientación (opcional; la etiqueta se conserva siempre). */
+    @ColumnInfo(name = "backsight_point_id") val backsightPointId: Long? = null,
     @ColumnInfo(name = "created_at") val createdAt: String,
 )
